@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+backend/.venv/
+
+# Build artifacts
+backend/data/
+*.pyc
+*.pyo
+__pycache__/
+*.egg-info/
+
+# Dev files
+.env
+.env.*
+!.env.example
+.git/
+.gitignore
+.ruff_cache/
+.pytest_cache/
+
+# Docs (not needed in npm package)
+TESTING.md

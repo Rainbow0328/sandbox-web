@@ -1,0 +1,40 @@
+# Sandbox Explorer — Docker Compose
+#
+# Port configuration:
+#   Set EXPLORER_PORT in .env or shell environment to change the container's
+#   internal port.  The host-side port defaults to the same value.
+#
+#   Example:  EXPLORER_PORT=3000  →  container listens on 3000, host maps 3000:3000
+#
+#   To use a different host port, override the left side of the mapping:
+#   ports:
+#     - "8088:8080"
+
+services:
+  sandbox-explorer:
+    # Use pre-built image from Docker Hub (uncomment for production):
+    # image: sandboxexplorer/sandbox-explorer:latest
+    # Or build from source:
+    build:
+      context: ..
+      dockerfile: sandbox-console/docker/Dockerfile
+    ports:
+      - "${EXPLORER_PORT:-8080}:${EXPLORER_PORT:-8080}"
+    volumes:
+      - sandbox-explorer-data:/data
+    environment:
+      - EXPLORER_MASTER_KEY=${EXPLORER_MASTER_KEY:-}
+      - EXPLORER_ADMIN_TOKEN=${EXPLORER_ADMIN_TOKEN:-}
+      - EXPLORER_PORT=${EXPLORER_PORT:-8080}
+      - EXPLORER_HOST=0.0.0.0
+      - EXPLORER_PUBLIC_URL=${EXPLORER_PUBLIC_URL:-http://localhost:8080}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request, os; urllib.request.urlopen(f'http://localhost:{os.environ.get(\"EXPLORER_PORT\", \"8080\")}/healthz')"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+volumes:
+  sandbox-explorer-data:

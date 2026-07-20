@@ -1,0 +1,72 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sandbox-explorer"
+version = "0.1.0"
+description = "Sandbox Explorer Web Console"
+readme = "../README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.11,<3.15"
+authors = [
+  { name = "Sandbox Explorer Contributors" },
+]
+keywords = ["sandbox", "opensandbox", "web-console", "fastapi"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Framework :: FastAPI",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development :: Debuggers",
+]
+dependencies = [
+  "fastapi>=0.110,<1",
+  "uvicorn[standard]>=0.30,<1",
+  "sqlalchemy[asyncio]>=2.0,<2.1",
+  "aiosqlite>=0.20,<1",
+  "alembic>=1.14,<2",
+  "pydantic>=2.11,<3",
+  "pydantic-settings>=2.5,<3",
+  "httpx>=0.27,<1",
+  "apscheduler>=3.10,<4",
+  "cryptography>=43,<46",
+  "structlog>=24.4,<26",
+  "python-multipart>=0.0.9,<1",
+  "agent-sandbox-backends>=0.1.0,<0.2",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3",
+  "pytest-asyncio>=0.24",
+  "httpx>=0.27",
+  "ruff>=0.11",
+]
+postgresql = [
+  "asyncpg>=0.29,<1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+# Local SDK source override (development only).
+# This section is automatically ignored when the path does not exist
+# (e.g., when installed from PyPI or in CI/Docker).
+# To publish to PyPI, ensure agents-backend is not present at ../../agents-backend.
+[tool.uv.sources]
+agent-sandbox-backends = { path = "../../agents-backend", editable = true }
+
+[tool.pytest.ini_options]
+addopts = "--strict-config --strict-markers"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "RUF"]

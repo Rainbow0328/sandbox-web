@@ -1,0 +1,238 @@
+const API_BASE = '/api/v1';
+
+class ApiError extends Error {
+  constructor(
+    public status: number,
+    public code: string,
+    message: string,
+    public details?: unknown,
+  ) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
+
+async function request<T>(
+  path: string,
+  options: RequestInit = {},
+): Promise<T> {
+  const url = `${API_BASE}${path}`;
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...(options.headers as Record<string, string>),
+  };
+
+  const response = await fetch(url, {
+    ...options,
+    headers,
+    credentials: 'include',
+  });
+
+  if (!response.ok) {
+    let code = 'unknown';
+    let message = `HTTP ${response.status}`;
+    let details: unknown;
+    try {
+      const body = await response.json();
+      code = body?.error?.code ?? code;
+      message = body?.error?.message ?? message;
+      details = body?.error?.details;
+    } catch {
+      // Non-JSON error response
+    }
+    throw new ApiError(response.status, code, message, details);
+  }
+
+  if (response.status === 204) {
+    return undefined as T;
+  }
+  return response.json() as Promise<T>;
+}
+
+export const api = {
+  get: <T>(path: string) => request<T>(path, { method: 'GET' }),
+  post: <T>(path: string, body?: unknown) =>
+    request<T>(path, {
+      method: 'POST',
+      body: body ? JSON.stringify(body) : undefined,
+    }),
+  put: <T>(path: string, body?: unknown) =>
+    request<T>(path, {
+      method: 'PUT',
+      body: body ? JSON.stringify(body) : undefined,
+    }),
+  patch: <T>(path: string, body?: unknown) =>
+    request<T>(path, {
+      method: 'PATCH',
+      body: body ? JSON.stringify(body) : undefined,
+    }),
+  delete: <T>(path: string) => request<T>(path, { method: 'DELETE' }),
+};
+
+export { ApiError };
+
+// --- Type definitions ---
+export interface ConnectionResponse {
+  id: string;
+  name: string;
+  provider_type: string;
+  endpoint: string;
+  auth_method: string;
+  default_workdir: string | null;
+  enabled: boolean;
+  capabilities_cache: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ConnectionTestResult {
+  ok: boolean;
+  message: string;
+  capabilities: Record<string, unknown> | null;
+  version: string | null;
+}
+
+export interface SandboxInfo {
+  sandbox_id: string;
+  connection_id: string | null;
+  name: string;
+  state: string;
+  image: string | null;
+  workdir: string;
+  expires_at: string | null;
+  metadata: Record<string, string>;
+}
+
+export interface SandboxListResponse {
+  items: SandboxInfo[];
+  total: number;
+  next_page_token: string | null;
+}
+
+export interface LoginResponse {
+  session_token: string;
+  actor_id: string;
+  auth_method: string;
+  expires_at: string;
+}
+
+export interface ActorInfo {
+  actor_id: string;
+  auth_method: string;
+}
+
+// --- File types ---
+export interface FileEntry {
+  path: string;
+  kind: 'file' | 'directory' | 'symlink' | 'other';
+  size: number;
+  content_hash: string | null;
+}
+
+export interface FileListResponse {
+  path: string;
+  entries: FileEntry[];
+}
+
+export interface FileContent {
+  path: string;
+  content: string;
+  content_hash: string;
+  size: number;
+  is_binary: boolean;
+}
+
+export interface FileWriteResult {
+  path: string;
+  content_hash: string;
+  size: number;
+  previous_hash: string | null;
+}
+
+// --- Command types ---
+export interface CommandCreateRequest {
+  command: string;
+  cwd?: string;
+  env?: Record<string, string>;
+  timeout_seconds?: number;
+  mode?: 'foreground' | 'background';
+}
+
+export interface CommandCreateResponse {
+  command_id: string;
+  status: string;
+  mode: string;
+}
+
+export interface CommandResponse {
+  command_id: string;
+  status: string;
+  exit_code: number | null;
+  duration_ms: number | null;
+  stdout: string;
+  stderr: string;
+  command: string;
+  cwd: string | null;
+  mode: string;
+}
+
+export interface Capabilities {
+  [key: string]: {
+    supported: boolean;
+    strength: string;
+    limits: Record<string, unknown>;
+    reason: string | null;
+    source: string;
+  };
+}
+
+// --- History types ---
+export interface HistoryEvent {
+  event_id: string;
+  source_seq: number;
+  source: string;
+  actor_type: string;
+  actor_id: string | null;
+  thread_id: string | null;
+  run_id: string | null;
+  operation_type: string;
+  status: string;
+  occurred_at: string;
+  completed_at: string | null;
+  duration_ms: number | null;
+  command: string | null;
+  cwd: string | null;
+  exit_code: number | null;
+  file_path: string | null;
+  file_change_type: string | null;
+  output_complete: number;
+  history_storage_state: string;
+}
+
+export interface HistoryResponse {
+  coverage: string;
+  source: string;
+  helper_status: string;
+  items: HistoryEvent[];
+  total: number;
+  last_synced_at: string | null;
+}
+
+export interface HistoryEventDetail {
+  event: HistoryEvent;
+  stdout: string | null;
+  stderr: string | null;
+  request: Record<string, unknown> | null;
+  result: Record<string, unknown> | null;
+}
+
+export interface HistoryAvailability {
+  available: boolean;
+  reason: string | null;
+  last_synced_at: string | null;
+}
+
+export interface TerminalCreateResponse {
+  terminal_id: string;
+  ws_url: string;
+}
