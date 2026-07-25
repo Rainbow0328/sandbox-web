@@ -4,33 +4,31 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import UTC
+from datetime import UTC, datetime
 
 from fastapi import WebSocket, WebSocketDisconnect
+from sqlalchemy import select
 
 from app.adapters.base import ExecRequest
+from app.core.config import get_settings
+from app.core.security import verify_admin_token
 from app.db.engine import get_session_factory
+from app.models.session import Session
 from app.services.file_service import get_sandbox_ref
 
 
 async def _verify_ws_token(token: str) -> str | None:
-    from app.core.config import get_settings
     settings = get_settings()
     if not settings.admin_token:
         return "admin"
-    from app.core.security import verify_admin_token
     if verify_admin_token(token):
         return "admin"
-    from sqlalchemy import select
-
-    from app.models.session import Session
     factory = get_session_factory()
     async with factory() as session:
         result = await session.execute(select(Session).where(Session.id == token))
         sess = result.scalar_one_or_none()
         if sess is None:
             return None
-        from datetime import datetime
         now = datetime.now(UTC)
         expires = datetime.fromisoformat(sess.expires_at.replace("Z", "+00:00"))
         if expires < now:
@@ -60,7 +58,7 @@ async def handle_terminal_websocket(
             await websocket.close(code=4404)
             return
 
-    cwd = connection.default_workdir or "/workspace"
+    cwd = connection.default_workdir or "/"
     await websocket.send_json({
         "type": "output",
         "data": f"Connected to sandbox {sandbox_id}\r\nuser@{sandbox_id}:{cwd}$ ",

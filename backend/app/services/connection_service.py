@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import secrets
+from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters import SandboxAdapter, create_adapter
@@ -24,6 +27,8 @@ from app.schemas.connection import ConnectionCreate, ConnectionUpdate
 
 SANDBOX_NAME_METADATA_KEY = "agent_sandbox.name"
 LEGACY_SANDBOX_NAME_METADATA_KEY = "sandbox_name"
+
+logger = logging.getLogger(__name__)
 
 
 def _now_iso() -> str:
@@ -169,8 +174,6 @@ async def test_connection(session: AsyncSession, connection_id: str) -> dict[str
     # Cache capabilities in the connection row.
     if result.capabilities is not None:
         # Convert dataclass Capabilities to a serializable dict.
-        from dataclasses import asdict
-
         connection.capabilities_cache = asdict(result.capabilities)
         connection.updated_at = _now_iso()
         await session.commit()
@@ -194,9 +197,6 @@ async def list_sandboxes_for_connection(
 
 async def list_all_sandboxes(session: AsyncSession) -> list[dict[str, Any]]:
     """Aggregate sandboxes across all enabled connections (parallel)."""
-    import asyncio
-    import logging
-    logger = logging.getLogger(__name__)
     connections = await list_connections(session)
 
     async def _fetch_one(conn: Connection) -> list[dict[str, Any]]:
@@ -215,6 +215,31 @@ async def list_all_sandboxes(session: AsyncSession) -> list[dict[str, Any]]:
     all_sandboxes: list[dict[str, Any]] = []
     for batch in results:
         all_sandboxes.extend(batch)
+
+    # Batch-query HistoryProjection for the latest activity timestamp per
+    # sandbox.  A single GROUP BY query is far cheaper than per-sandbox
+    # lookups and covers both Console and SDK operations.
+    if all_sandboxes:
+        try:
+            stmt = (
+                select(
+                    HistoryProjection.connection_id,
+                    HistoryProjection.sandbox_id,
+                    func.max(HistoryProjection.occurred_at).label("last_activity"),
+                )
+                .group_by(HistoryProjection.connection_id, HistoryProjection.sandbox_id)
+            )
+            rows = await session.execute(stmt)
+            activity_map: dict[tuple[str, str], str] = {}
+            for row in rows:
+                activity_map[(row.connection_id, row.sandbox_id)] = row.last_activity
+            for sb in all_sandboxes:
+                key = (sb.get("connection_id"), sb.get("sandbox_id"))
+                if key in activity_map:
+                    sb["last_activity_at"] = activity_map[key]
+        except Exception as exc:
+            logger.warning("list_all_sandboxes: failed to query last activity: %s", exc)
+
     logger.info(
         "list_all_sandboxes: total %d sandboxes from %d connections",
         len(all_sandboxes), len(connections),
@@ -233,6 +258,8 @@ def _sandbox_info_to_dict(sb: SandboxInfo, connection_id: str) -> dict[str, Any]
         "state": sb.state.value if hasattr(sb.state, "value") else str(sb.state),
         "image": sb.image,
         "workdir": sb.workdir,
-        "expires_at": None,
+        "expires_at": sb.expires_at,
+        "created_at": sb.created_at,
+        "last_activity_at": None,  # populated by list_all_sandboxes
         "metadata": metadata,
     }

@@ -11,7 +11,9 @@ dataclass domain types and the SDK's pydantic domain models, and exposes
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from dataclasses import asdict
 from typing import Any
+from urllib.parse import urlparse
 
 from agent_sandbox_backends.domain.capabilities import Capabilities as SDKCapabilities
 from agent_sandbox_backends.domain.commands import (
@@ -62,6 +64,26 @@ from app.adapters.base import (
     WriteFileRequest,
     WriteFileResult,
 )
+from app.core.errors import (
+    CapabilityUnavailableError,
+    FileConflictError,
+    SandboxNotFoundError,
+)
+
+
+def _convert_sdk_error(exc: Exception) -> Exception:
+    """Convert SDK exceptions to ExplorerError subclasses for better HTTP mapping."""
+    exc_name = type(exc).__name__
+    msg = str(exc)
+
+    if "NotFound" in exc_name or "SANDBOX_NOT_FOUND" in msg or "FILE_NOT_FOUND" in msg:
+        return SandboxNotFoundError(msg, details={"sdk_error": exc_name})
+    if "Conflict" in exc_name or "Concurrent" in exc_name:
+        return FileConflictError(msg, details={"sdk_error": exc_name})
+    if "UnsupportedCapability" in exc_name:
+        return CapabilityUnavailableError(msg, details={"sdk_error": exc_name})
+    # Default: return original exception (will be caught by general handler).
+    return exc
 
 
 class OpenSandboxConsoleAdapter:
@@ -93,17 +115,33 @@ class OpenSandboxConsoleAdapter:
         if not resolved_domain and endpoint:
             # Parse endpoint URL to extract domain.
             # e.g., "http://localhost:8080" -> domain="localhost:8080", protocol="http"
-            from urllib.parse import urlparse
+            # Also handle bare "host:port" without scheme.
+            # If endpoint lacks a scheme, prepend http:// so urlparse can
+            # correctly separate hostname and port.
+            raw = endpoint.strip()
+            if "://" not in raw:
+                raw = f"http://{raw}"
 
-            parsed = urlparse(endpoint)
+            parsed = urlparse(raw)
             resolved_domain = parsed.hostname
             if parsed.port:
                 resolved_domain = f"{resolved_domain}:{parsed.port}"
             if parsed.scheme:
                 protocol = parsed.scheme
 
+        # Use the SDK's default provider_key ("opensandbox-default") for the
+        # underlying provider, NOT connection.id.  This is critical for history:
+        # the SDK's SandboxBackend initialises the sandbox's history SQLite with
+        # provider_key="opensandbox-default" in the history_meta table.  If
+        # Console uses a different provider_key, the history helper's identity
+        # check (initialize → "History identity conflict for provider_key")
+        # rejects the init call, and Console cannot read or write the shared
+        # history database.
+        #
+        # self.provider_key (connection.id) is retained for Console's internal
+        # bookkeeping (cache keys, ref tracking) but is NEVER passed to the SDK.
         self._provider = OpenSandboxProvider(
-            provider_key=provider_key,
+            provider_key="opensandbox-default",
             api_key=resolved_api_key,
             domain=resolved_domain,
             protocol=protocol,
@@ -144,11 +182,16 @@ class OpenSandboxConsoleAdapter:
             SDKSandboxState.UNKNOWN: SandboxState.UNKNOWN,
             SDKSandboxState.DELETED: SandboxState.DELETED,
         }
+        # Convert datetime to ISO string for the Console dataclass.
+        created_at = info.created_at.isoformat() if info.created_at else None
+        expires_at = info.expires_at.isoformat() if info.expires_at else None
         return SandboxInfo(
             ref=OpenSandboxConsoleAdapter._from_sdk_ref(info.ref),
             state=state_map.get(info.state, SandboxState.UNKNOWN),
             image=info.image,
             workdir=info.workdir,
+            created_at=created_at,
+            expires_at=expires_at,
         )
 
     @staticmethod
@@ -200,8 +243,6 @@ class OpenSandboxConsoleAdapter:
     @staticmethod
     def _from_sdk_capabilities(caps: SDKCapabilities) -> Capabilities:
         """Convert SDK Capabilities (pydantic) to our Capabilities (dataclass)."""
-        from dataclasses import asdict
-
         # SDK Capabilities is a pydantic model with the same structure.
         # Use model_dump() to get a dict, then reconstruct our dataclass.
         caps_dict = caps.model_dump() if hasattr(caps, "model_dump") else asdict(caps)
@@ -246,22 +287,34 @@ class OpenSandboxConsoleAdapter:
 
     async def get_sandbox(self, ref: SandboxRef) -> SandboxInfo:
         sdk_ref = self._to_sdk_ref(ref)
-        info = await self._provider.get(sdk_ref)
-        return self._from_sdk_info(info)
+        try:
+            info = await self._provider.get(sdk_ref)
+            return self._from_sdk_info(info)
+        except Exception as exc:
+            raise _convert_sdk_error(exc) from exc
 
     async def pause_sandbox(self, ref: SandboxRef) -> SandboxInfo:
         sdk_ref = self._to_sdk_ref(ref)
-        info = await self._provider.pause(sdk_ref)
-        return self._from_sdk_info(info)
+        try:
+            info = await self._provider.pause(sdk_ref)
+            return self._from_sdk_info(info)
+        except Exception as exc:
+            raise _convert_sdk_error(exc) from exc
 
     async def resume_sandbox(self, ref: SandboxRef) -> SandboxInfo:
         sdk_ref = self._to_sdk_ref(ref)
-        info = await self._provider.resume(sdk_ref)
-        return self._from_sdk_info(info)
+        try:
+            info = await self._provider.resume(sdk_ref)
+            return self._from_sdk_info(info)
+        except Exception as exc:
+            raise _convert_sdk_error(exc) from exc
 
     async def delete_sandbox(self, ref: SandboxRef) -> None:
         sdk_ref = self._to_sdk_ref(ref)
-        await self._provider.delete(sdk_ref)
+        try:
+            await self._provider.delete(sdk_ref)
+        except Exception as exc:
+            raise _convert_sdk_error(exc) from exc
 
     async def capabilities(self, ref: SandboxRef | None = None) -> Capabilities:
         sdk_ref = self._to_sdk_ref(ref) if ref else None
@@ -272,12 +325,18 @@ class OpenSandboxConsoleAdapter:
 
     async def list_files(self, ref: SandboxRef, path: str) -> list[FileEntry]:
         sdk_ref = self._to_sdk_ref(ref)
-        entries = await self._provider.list_files(sdk_ref, path)
-        return [self._from_sdk_file_entry(e) for e in entries]
+        try:
+            entries = await self._provider.list_files(sdk_ref, path)
+            return [self._from_sdk_file_entry(e) for e in entries]
+        except Exception as exc:
+            raise _convert_sdk_error(exc) from exc
 
     async def read_file(self, ref: SandboxRef, path: str) -> bytes:
         sdk_ref = self._to_sdk_ref(ref)
-        return await self._provider.read_file(sdk_ref, path)
+        try:
+            return await self._provider.read_file(sdk_ref, path)
+        except Exception as exc:
+            raise _convert_sdk_error(exc) from exc
 
     async def write_file(self, ref: SandboxRef, request: WriteFileRequest) -> WriteFileResult:
         sdk_ref = self._to_sdk_ref(ref)
@@ -286,7 +345,10 @@ class OpenSandboxConsoleAdapter:
             content=request.content,
             expected_hash=request.expected_hash,
         )
-        result = await self._provider.write_file(sdk_ref, sdk_request)
+        try:
+            result = await self._provider.write_file(sdk_ref, sdk_request)
+        except Exception as exc:
+            raise _convert_sdk_error(exc) from exc
         return WriteFileResult(
             entry=self._from_sdk_file_entry(result.entry),
             previous_hash=result.previous_hash,
@@ -295,14 +357,20 @@ class OpenSandboxConsoleAdapter:
 
     async def delete_file(self, ref: SandboxRef, path: str) -> None:
         sdk_ref = self._to_sdk_ref(ref)
-        await self._provider.delete_file(sdk_ref, path)
+        try:
+            await self._provider.delete_file(sdk_ref, path)
+        except Exception as exc:
+            raise _convert_sdk_error(exc) from exc
 
     # --- Command ---
 
     async def execute(self, ref: SandboxRef, request: ExecRequest) -> ExecResult:
         sdk_ref = self._to_sdk_ref(ref)
         sdk_request = self._to_sdk_exec_request(request)
-        result = await self._provider.execute(sdk_ref, sdk_request)
+        try:
+            result = await self._provider.execute(sdk_ref, sdk_request)
+        except Exception as exc:
+            raise _convert_sdk_error(exc) from exc
         return self._from_sdk_exec_result(result)
 
     async def execute_stream(

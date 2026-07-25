@@ -2,14 +2,26 @@
 
 from __future__ import annotations
 
+import secrets
 from datetime import UTC, datetime
+from urllib.parse import urlparse
 
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.adapters.base import Capabilities, CreateSandboxRequest, SandboxInfo
+from app.adapters.base import Capabilities, CreateSandboxRequest, ExecRequest, SandboxInfo
+from app.history.store_pool import close_history_store
+from app.history.writer import write_operation_to_sandbox_history
+from app.models.connection import Connection
+from app.models.history_projection import HistoryProjection
 from app.schemas.connection import ConnectionCreate
 from app.services.connection_service import build_adapter, create_connection, get_connection
-from app.services.file_service import _log_activity, get_sandbox_ref, invalidate_instance_id_cache
+from app.services.file_service import (
+    _instance_id_cache,
+    _log_activity,
+    get_sandbox_ref,
+    invalidate_instance_id_cache,
+)
 
 SANDBOX_NAME_METADATA_KEY = "agent_sandbox.name"
 LEGACY_SANDBOX_NAME_METADATA_KEY = "sandbox_name"
@@ -29,7 +41,9 @@ def _sandbox_info_to_dict(sb: SandboxInfo, connection_id: str) -> dict:
         "state": sb.state.value if hasattr(sb.state, "value") else str(sb.state),
         "image": sb.image,
         "workdir": sb.workdir,
-        "expires_at": None,
+        "expires_at": sb.expires_at,
+        "created_at": sb.created_at,
+        "last_activity_at": None,  # populated by caller if needed
         "metadata": metadata,
     }
 
@@ -40,7 +54,20 @@ async def get_sandbox(
     """Get a single sandbox by ID."""
     ref, adapter, _ = await get_sandbox_ref(session, connection_id, sandbox_id)
     info = await adapter.get_sandbox(ref)
-    return _sandbox_info_to_dict(info, connection_id)
+    result = _sandbox_info_to_dict(info, connection_id)
+    # Best-effort: populate last_activity_at from history projection.
+    try:
+        stmt = (
+            select(func.max(HistoryProjection.occurred_at))
+            .where(HistoryProjection.connection_id == connection_id)
+            .where(HistoryProjection.sandbox_id == sandbox_id)
+        )
+        last_activity = await session.scalar(stmt)
+        if last_activity:
+            result["last_activity_at"] = last_activity
+    except Exception:
+        pass
+    return result
 
 
 async def create_sandbox(
@@ -51,7 +78,7 @@ async def create_sandbox(
     """Create a new sandbox on the given connection."""
     connection = await get_connection(session, connection_id)
     adapter = build_adapter(connection)
-    workdir = workdir or connection.default_workdir or "/workspace"
+    workdir = workdir or connection.default_workdir or "/"
     request = CreateSandboxRequest(
         image=image,
         workdir=workdir,
@@ -64,12 +91,10 @@ async def create_sandbox(
     info = await adapter.create_sandbox(request)
 
     # Cache the instance_id for future lookups.
-    from app.services.file_service import _instance_id_cache
     _instance_id_cache[f"{connection_id}:{info.ref.sandbox_id}"] = info.ref.sandbox_instance_id
 
     # Ensure workdir exists in the sandbox (Docker image may not have it).
     try:
-        from app.adapters.base import ExecRequest
         await adapter.execute(info.ref, ExecRequest(
             command=f"mkdir -p {workdir}",
             cwd="/",
@@ -85,7 +110,6 @@ async def create_sandbox(
     )
 
     # Best-effort write to sandbox history.
-    from app.history.writer import write_operation_to_sandbox_history
     await write_operation_to_sandbox_history(
         session, info.ref, adapter, activity,
         operation_type="sandbox.create",
@@ -103,43 +127,52 @@ async def create_sandbox_direct(
     api_key: str = "",
     provider_type: str = "opensandbox",
     image: str = "python:3.12",
-    workdir: str = "/workspace",
+    workdir: str = "/",
     name: str = "",
     ttl_seconds: int | None = None,
     save_connection: bool = True,
 ) -> dict:
     """Create a sandbox directly with endpoint + API key.
 
-    If ``save_connection`` is true, a Connection record is auto-created
-    (name derived from endpoint) so the sandbox can be managed later.
-    Then delegates to ``create_sandbox``.
+    If ``save_connection`` is true (default), an existing Connection with the
+    same endpoint is reused; otherwise a new Connection record is auto-created
+    so the sandbox can be managed later.  Then delegates to ``create_sandbox``.
     """
     if save_connection:
-        # Auto-create a connection record.
-        from urllib.parse import urlparse
-
-        parsed = urlparse(endpoint)
-        host = parsed.hostname or endpoint
-        conn_name = f"{host}-{endpoint[-6:] if len(endpoint) > 6 else endpoint}"
-
-        conn_create = ConnectionCreate(
-            name=conn_name,
-            provider_type=provider_type,
-            endpoint=endpoint,
-            auth_method="api_key",
-            credentials={"api_key": api_key} if api_key else {},
-            default_workdir=workdir,
+        # Reuse an existing connection with the same endpoint if one exists;
+        # otherwise auto-create a new connection record.
+        result = await session.execute(
+            select(Connection).where(Connection.endpoint == endpoint)
         )
-        connection = await create_connection(session, conn_create)
-        connection_id = connection.id
+        existing = result.scalars().first()
+        if existing is not None:
+            connection_id = existing.id
+        else:
+            parsed = urlparse(endpoint)
+            host = parsed.hostname or endpoint
+            conn_name = f"{host}:{parsed.port}" if parsed.port else host
+
+            conn_create = ConnectionCreate(
+                name=conn_name,
+                provider_type=provider_type,
+                endpoint=endpoint,
+                auth_method="api_key",
+                credentials={"api_key": api_key} if api_key else {},
+                default_workdir=workdir,
+            )
+            connection = await create_connection(session, conn_create)
+            connection_id = connection.id
     else:
-        # Ephemeral: create a temporary Connection-like object without persisting.
-        # We still need a connection_id for activity logging, so create and mark disabled.
+        # Ephemeral: create a temporary connection without persisting a reusable
+        # record. We still need a connection_id for activity logging.
         from urllib.parse import urlparse
 
         parsed = urlparse(endpoint)
         host = parsed.hostname or endpoint
-        conn_name = f"ephemeral-{host}"
+        conn_name = f"ephemeral-{host}-{endpoint[-4:]}"
+
+        # Ensure uniqueness with a random suffix to avoid collisions.
+        conn_name = f"{conn_name}-{secrets.token_hex(3)}"
 
         conn_create = ConnectionCreate(
             name=conn_name,
@@ -170,7 +203,6 @@ async def pause_sandbox(
         "sandbox.pause", "succeeded",
     )
 
-    from app.history.writer import write_operation_to_sandbox_history
     await write_operation_to_sandbox_history(
         session, ref, adapter, activity,
         operation_type="sandbox.pause",
@@ -191,7 +223,6 @@ async def resume_sandbox(
         "sandbox.resume", "succeeded",
     )
 
-    from app.history.writer import write_operation_to_sandbox_history
     await write_operation_to_sandbox_history(
         session, ref, adapter, activity,
         operation_type="sandbox.resume",
@@ -213,7 +244,6 @@ async def delete_sandbox(
         "sandbox.delete", "succeeded",
     )
 
-    from app.history.writer import write_operation_to_sandbox_history
     await write_operation_to_sandbox_history(
         session, ref, adapter, activity,
         operation_type="sandbox.delete",
@@ -223,6 +253,8 @@ async def delete_sandbox(
     await adapter.delete_sandbox(ref)
     # Invalidate instance_id cache after deletion.
     invalidate_instance_id_cache(connection_id, sandbox_id)
+    # Close and remove cached history store for this sandbox.
+    await close_history_store(connection_id, sandbox_id)
 
 
 async def get_capabilities(

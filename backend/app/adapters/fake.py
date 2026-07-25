@@ -186,19 +186,19 @@ class FakeAdapter:
             stdout = (cmd[5:] + "\n").encode()
         elif cmd == "ls" or cmd.startswith("ls "):
             files = self._files.get(ref.sandbox_id, {})
-            paths = sorted(f.split("/")[-1] for f in files if f.startswith(request.cwd or "/workspace"))
+            paths = sorted(f.split("/")[-1] for f in files if f.startswith(request.cwd or "/"))
             stdout = ("  ".join(paths) + "\n").encode() if paths else b""
         elif cmd.startswith("cat "):
             fname = cmd[4:].strip()
             files = self._files.get(ref.sandbox_id, {})
-            content = files.get(fname) or files.get(f"{request.cwd or '/workspace'}/{fname}")
+            content = files.get(fname) or files.get(f"{request.cwd or '/'}/{fname}")
             if content:
                 stdout = content
             else:
                 stderr = f"cat: {fname}: No such file\n".encode()
                 exit_code = 1
         elif cmd == "pwd":
-            stdout = (request.cwd or "/workspace\n").encode() + b"\n"
+            stdout = (request.cwd or "/").encode() + b"\n"
         elif cmd.startswith("python"):
             stdout = b"Python 3.12.0 (main, fake sandbox)\n"
         else:

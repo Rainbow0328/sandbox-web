@@ -11,6 +11,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.base import ExecRequest
 from app.core.config import get_settings
+from app.core.errors import CommandPolicyDeniedError
+from app.gateway.policy import evaluate_command_policy
+from app.history.writer import write_operation_to_sandbox_history
 from app.schemas.command import (
     CommandCreateRequest,
     CommandCreateResponse,
@@ -51,20 +54,16 @@ async def execute_command(
     ref, adapter, connection = await get_sandbox_ref(session, connection_id, sandbox_id)
 
     command_id = _gen_command_id()
-    cwd = request.cwd or connection.default_workdir or "/workspace"
+    cwd = request.cwd or connection.default_workdir or "/"
 
     settings = get_settings()
     timeout = request.timeout_seconds or settings.command_default_timeout_seconds
 
     # Evaluate command policy (§9.3, §15.4) — v0.1 defaults to allow.
-    from app.gateway.policy import evaluate_command_policy
-
     decision = evaluate_command_policy(
         command=request.command, cwd=cwd, actor_id=actor_id,
     )
     if decision.result == "deny":
-        from app.core.errors import CommandPolicyDeniedError
-
         await _log_activity(
             session, connection_id, sandbox_id, actor_id,
             "command.finish", "denied",
@@ -165,17 +164,31 @@ async def execute_command(
     # Store result.
     _command_store[command_id] = response
 
+    # Truncate output for storage (10KB limit per stream).
+    _MAX_OUTPUT = 10_000
+    stdout_preview = (response.stdout or "")[:_MAX_OUTPUT]
+    stderr_preview = (response.stderr or "")[:_MAX_OUTPUT]
+    output_truncated = (
+        len(response.stdout or "") > _MAX_OUTPUT
+        or len(response.stderr or "") > _MAX_OUTPUT
+    )
+
     # Log command finish — history_state stays "pending" until history writer updates it.
     activity = await _log_activity(
         session, connection_id, sandbox_id, actor_id,
         "command.finish", response.status.value,
         {"command": request.command, "cwd": cwd},
-        {"exit_code": response.exit_code, "duration_ms": response.duration_ms},
+        {
+            "exit_code": response.exit_code,
+            "duration_ms": response.duration_ms,
+            "stdout": stdout_preview,
+            "stderr": stderr_preview,
+            "output_truncated": output_truncated,
+        },
         duration_ms=response.duration_ms,
     )
 
     # Best-effort write to sandbox history.
-    from app.history.writer import write_operation_to_sandbox_history
     await write_operation_to_sandbox_history(
         session, ref, adapter, activity,
         operation_type="command.finish",
@@ -184,8 +197,9 @@ async def execute_command(
         result_payload={
             "exit_code": response.exit_code,
             "duration_ms": response.duration_ms,
-            "stdout": response.stdout,
-            "stderr": response.stderr,
+            "stdout": stdout_preview,
+            "stderr": stderr_preview,
+            "output_truncated": output_truncated,
         },
         command=request.command,
         cwd=cwd,

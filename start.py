@@ -38,7 +38,7 @@ FRONTEND_DIST = FRONTEND_DIR / "dist"
 ENV_FILE = ROOT / ".env"
 
 # Default values.
-DEFAULT_BACKEND_PORT = 8080
+DEFAULT_BACKEND_PORT = 9090
 DEFAULT_BACKEND_HOST = "0.0.0.0"
 DEFAULT_FRONTEND_PORT = 5173
 
@@ -154,7 +154,9 @@ def start_production(port: int, host: str) -> None:
         "EXPLORER_HOST": host,
     }
 
-    print(f"[start] Starting production server on http://{host}:{port}")
+    # Show a clickable URL (localhost) even when binding to 0.0.0.0.
+    display_host = "localhost" if host in ("0.0.0.0", "::") else host
+    print(f"[start] Starting production server on http://{display_host}:{port}")
     print(f"[start] Static files: {FRONTEND_DIST}")
 
     # Use uvicorn directly.
@@ -175,7 +177,9 @@ def start_production(port: int, host: str) -> None:
 
 def start_dev(port: int, host: str, frontend_port: int) -> None:
     """Start both frontend dev server and backend in parallel."""
-    print(f"[start] Dev mode: backend on :{port}, frontend on :{frontend_port}")
+    # Show a clickable URL (localhost) even when binding to 0.0.0.0.
+    display_host = "localhost" if host in ("0.0.0.0", "::") else host
+    print(f"[start] Dev mode: backend on http://{display_host}:{port}, frontend on http://localhost:{frontend_port}")
 
     # Start backend.
     backend_env = {
@@ -206,7 +210,7 @@ def start_dev(port: int, host: str, frontend_port: int) -> None:
         },
     )
 
-    print(f"\n[start] Backend:  http://{host}:{port}")
+    print(f"\n[start] Backend:  http://{display_host}:{port}")
     print(f"[start] Frontend: http://localhost:{frontend_port}")
     print("[start] Press Ctrl+C to stop both.\n")
 
@@ -244,7 +248,7 @@ def main() -> None:
         "--port",
         type=int,
         default=None,
-        help=f"Backend port (env: EXPLORER_PORT, default: {DEFAULT_BACKEND_PORT})",
+        help=f"Backend port (env: EXPLORER_PORT, default: {DEFAULT_BACKEND_PORT}). Note: OpenSandbox service uses 8080; Console defaults to 9090 to avoid conflict.",
     )
     parser.add_argument(
         "--host",

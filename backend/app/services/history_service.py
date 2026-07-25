@@ -13,13 +13,19 @@ in ``history_projection``, the projection (sandbox-sourced) entry takes preceden
 
 from __future__ import annotations
 
+import asyncio
+import base64
+import logging
+import time
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.fake import FakeAdapter
 from app.adapters.opensandbox import OpenSandboxConsoleAdapter
+from app.core.config import get_settings
+from app.history.store_pool import get_history_store
 from app.models.console_activity import ConsoleActivity
 from app.models.consumer_cursor import ConsumerCursor
 from app.models.history_projection import HistoryProjection
@@ -30,6 +36,12 @@ from app.schemas.history import (
     HistoryResponse,
 )
 from app.services.file_service import get_sandbox_ref
+
+logger = logging.getLogger(__name__)
+
+# Throttle: minimum seconds between sync calls for the same sandbox.
+_SYNC_THROTTLE_SECONDS = 5.0
+_last_sync_ts: dict[str, float] = {}
 
 
 def _now_iso() -> str:
@@ -45,12 +57,24 @@ async def sync_history(
       1. get_sandbox_ref returns real ref with correct instance_id.
       2. Read cursor: acknowledged_seq (confirmed) + pending_seq (unACK'd).
       3. If pending_seq exists, retry ACK first.
-      4. Query changes → get_operation → map → upsert.
+      4. Query changes → batch get_operations → map → upsert.
       5. Write pending_seq → commit → ACK → confirmed.
-    """
-    from app.core.config import get_settings
 
-    ref, adapter, _ = await get_sandbox_ref(session, connection_id, sandbox_id)
+    Throttled: returns immediately if called within ``_SYNC_THROTTLE_SECONDS``
+    of the last sync for the same sandbox.
+    """
+    # Throttle: skip if synced recently.
+    throttle_key = f"{connection_id}:{sandbox_id}"
+    now = time.monotonic()
+    last = _last_sync_ts.get(throttle_key, 0)
+    if now - last < _SYNC_THROTTLE_SECONDS:
+        return {"synced": 0, "status": "throttled"}
+    _last_sync_ts[throttle_key] = now
+
+    try:
+        ref, adapter, _ = await get_sandbox_ref(session, connection_id, sandbox_id)
+    except Exception as exc:
+        return {"synced": 0, "status": "error", "message": str(exc)}
     instance_id = ref.sandbox_instance_id
     settings = get_settings()
     stable_consumer_id = f"console:{settings.deployment_id}"
@@ -68,13 +92,34 @@ async def sync_history(
     after_seq = cursor.acknowledged_seq if cursor else 0
     consumer_id = cursor.consumer_id if cursor else stable_consumer_id
 
+    # Clean up stale cursor rows from previous sandbox instances.
+    # When a sandbox is recreated, it gets a new sandbox_instance_id,
+    # leaving orphaned cursor rows that can cause MultipleResultsFound
+    # in get_history / get_availability (which don't filter by instance_id).
+    stale_result = await session.execute(
+        select(ConsumerCursor)
+        .where(
+            ConsumerCursor.connection_id == connection_id,
+            ConsumerCursor.sandbox_id == sandbox_id,
+            ConsumerCursor.sandbox_instance_id != instance_id,
+        )
+    )
+    stale_cursors = stale_result.scalars().all()
+    for stale in stale_cursors:
+        logger.info(
+            "Removing stale cursor for instance %s (current: %s)",
+            stale.sandbox_instance_id, instance_id,
+        )
+        await session.delete(stale)
+    if stale_cursors:
+        await session.commit()
+
     # Retry pending ACK if previous sync committed but ACK failed.
     if (
         isinstance(adapter, OpenSandboxConsoleAdapter)
         and cursor
         and cursor.pending_seq is not None
     ):
-        retry_store = None
         try:
             retry_store = await _create_sdk_store(adapter, ref)
             await retry_store.acknowledge(consumer_id, cursor.pending_seq)
@@ -89,12 +134,6 @@ async def sync_history(
                 "status": "ack_pending",
                 "pending_seq": cursor.pending_seq,
             }
-        finally:
-            if retry_store is not None:
-                try:
-                    await retry_store.close()
-                except Exception:
-                    pass
 
     # --- Branch by adapter type ---
     sdk_store = None
@@ -133,7 +172,7 @@ async def sync_history(
     await session.commit()
 
     # ACK AFTER commit — on success, promote pending → confirmed.
-    # ACK and close are SEPARATE: store must close even with no new data.
+    # NOTE: store is NOT closed — it's cached in the store pool for reuse.
     try:
         if sdk_store and next_seq > after_seq:
             await sdk_store.acknowledge(consumer_id, next_seq)
@@ -153,42 +192,17 @@ async def sync_history(
                 await session.commit()
     except Exception:
         pass  # ACK failed: pending_seq stays; next sync will retry.
-    finally:
-        if sdk_store is not None:
-            try:
-                await sdk_store.close()
-            except Exception:
-                pass
 
     return {"synced": upserted, "total": len(events)}
 
 
 async def _create_sdk_store(adapter: OpenSandboxConsoleAdapter, ref):
-    """Create a SandboxHistoryStore for ACK retry."""
-    from agent_sandbox_backends.history.config import (
-        HistoryConfig,
-        HistoryConsistency,
-        HistoryMode,
+    """Create a SandboxHistoryStore for ACK retry — uses the cached store pool."""
+    return await get_history_store(
+        adapter, ref,
+        connection_id=ref.provider_key,
+        sandbox_id=ref.sandbox_id,
     )
-    from agent_sandbox_backends.history.provider_transport import (
-        ProviderHistoryHelperTransport,
-    )
-    from agent_sandbox_backends.history.sandbox import SandboxHistoryStore
-    from agent_sandbox_backends.version import SDK_VERSION
-
-    sdk_provider = adapter.sdk_provider
-    sdk_ref = adapter.to_sdk_ref(ref)
-    transport = ProviderHistoryHelperTransport(sdk_provider, sdk_ref)
-    store = SandboxHistoryStore(
-        transport,
-        sdk_version=SDK_VERSION,
-        config=HistoryConfig(
-            mode=HistoryMode.SANDBOX,
-            consistency=HistoryConsistency.BEST_EFFORT,
-        ),
-    )
-    await store.initialize()
-    return store
 
 
 async def _sync_from_sdk(
@@ -198,46 +212,28 @@ async def _sync_from_sdk(
 ) -> dict:
     """Query real history from SDK with correct Change→Operation flow.
 
-    1. query_changes() returns Change notifications (event_id + source_seq).
-    2. For each event_id, call get_operation() to get full Operation data.
-    3. Map SDK Operation format to Web Projection format.
-    4. Paginate until next_change_seq >= max_change_seq.
-    5. Return operations + metadata for upsert + ACK.
-
-    Does NOT ACK — caller ACKs after local commit.
+    Uses the cached SandboxHistoryStore from the store pool to avoid
+    re-installing the history helper on every sync.
     """
     try:
-        from agent_sandbox_backends.history.config import (
-            HistoryConfig,
-            HistoryConsistency,
-            HistoryMode,
+        store = await get_history_store(
+            adapter, ref,
+            connection_id=ref.provider_key,
+            sandbox_id=ref.sandbox_id,
         )
-        from agent_sandbox_backends.history.provider_transport import (
-            ProviderHistoryHelperTransport,
-        )
-        from agent_sandbox_backends.history.sandbox import SandboxHistoryStore
-        from agent_sandbox_backends.version import SDK_VERSION
-
-        sdk_provider = adapter.sdk_provider
-        sdk_ref = adapter.to_sdk_ref(ref)
-
-        transport = ProviderHistoryHelperTransport(sdk_provider, sdk_ref)
-        store = SandboxHistoryStore(
-            transport,
-            sdk_version=SDK_VERSION,
-            config=HistoryConfig(
-                mode=HistoryMode.SANDBOX,
-                consistency=HistoryConsistency.BEST_EFFORT,
-            ),
-        )
-
-        await store.initialize()
+        if store is None:
+            return {
+                "operations": [],
+                "next_change_seq": after_seq,
+                "max_change_seq": after_seq,
+                "reset_required": False,
+                "store": None,
+            }
 
         all_operations: list[dict] = []
         current_seq = after_seq
         max_seq = after_seq
         reset_required = False
-        operation_error = None
 
         while True:
             response = await store.query_changes(
@@ -258,30 +254,36 @@ async def _sync_from_sdk(
                 current_seq = 0
                 continue  # Re-query from seq=0.
 
-            # Get full Operation for each Change's event_id.
-            # Stop on first failure — don't ACK past unprocessed changes.
-            last_success_seq = current_seq
+            if not changes:
+                break
+
+            # Batch-fetch all operation details in a single helper invocation
+            # instead of N separate get_operation calls.
+            event_ids = [c.get("event_id") for c in changes if c.get("event_id")]
+            try:
+                batch_result = await store.get_operations(event_ids)
+                ops_by_id = {
+                    op.get("event_id"): op
+                    for op in (batch_result.get("operations", []) if isinstance(batch_result, dict) else [])
+                }
+            except Exception:
+                batch_result = None
+                ops_by_id = {}
+
+            # Map changes to operations, preserving change order.
             for change in changes:
                 event_id = change.get("event_id")
                 if not event_id:
                     continue
-                try:
-                    op = await store.get_operation(event_id)
+                op = ops_by_id.get(event_id)
+                if op is not None:
                     mapped = _map_sdk_operation(op, change.get("source_seq", 0))
                     all_operations.append(mapped)
-                    last_success_seq = change.get("source_seq", next_seq)
-                except Exception as exc:
-                    operation_error = str(exc)
-                    break  # Break for loop.
 
-            current_seq = last_success_seq
+            current_seq = next_seq
 
-            # Stop on operation error — prevent infinite loop on same failure.
-            if operation_error is not None:
-                break
-
-            # Stop when no more changes or all consumed.
-            if not changes or next_seq >= max_seq:
+            # Stop when all consumed.
+            if next_seq >= max_seq:
                 break
 
         return {
@@ -293,12 +295,8 @@ async def _sync_from_sdk(
         }
 
     except Exception:
-        # If store was created but we failed, close it to prevent leak.
-        try:
-            if "store" in dir() and store is not None:
-                await store.close()
-        except Exception:
-            pass
+        # If sync failed, the store may be stale — don't close it here,
+        # the store pool will health-check on next access.
         return {
             "operations": [],
             "next_change_seq": after_seq,
@@ -361,8 +359,6 @@ async def _clear_projection(
     instance_id: str,
 ) -> None:
     """Clear all projections for a sandbox instance (for reset_required)."""
-    from sqlalchemy import delete
-
     await session.execute(
         delete(HistoryProjection)
         .where(
@@ -433,43 +429,6 @@ async def _upsert_projection(
         # Update all fields with newer source_seq (unified _apply_fields).
         _apply_operation_to_projection(existing, event)
     # If source_seq is equal or lower, skip (idempotent).
-
-
-async def _update_cursor(
-    session: AsyncSession,
-    connection_id: str,
-    sandbox_id: str,
-    instance_id: str,
-    seq: int,
-) -> None:
-    """Update or create the consumer cursor."""
-    result = await session.execute(
-        select(ConsumerCursor)
-        .where(
-            ConsumerCursor.connection_id == connection_id,
-            ConsumerCursor.sandbox_id == sandbox_id,
-            ConsumerCursor.sandbox_instance_id == instance_id,
-        )
-    )
-    cursor = result.scalar_one_or_none()
-    now = _now_iso()
-
-    if cursor is None:
-        from app.core.config import get_settings
-
-        settings = get_settings()
-        cursor = ConsumerCursor(
-            connection_id=connection_id,
-            sandbox_id=sandbox_id,
-            sandbox_instance_id=instance_id,
-            consumer_id=f"console:{settings.deployment_id}",
-            acknowledged_seq=seq,
-            last_synced_at=now,
-        )
-        session.add(cursor)
-    else:
-        cursor.acknowledged_seq = max(cursor.acknowledged_seq, seq)
-        cursor.last_synced_at = now
 
 
 def _apply_operation_to_projection(proj: HistoryProjection, event: dict) -> None:
@@ -593,6 +552,10 @@ async def get_history(
             exit_code=p.exit_code,
             file_path=p.file_path,
             file_change_type=p.file_change_type,
+            before_hash=p.before_hash,
+            after_hash=p.after_hash,
+            before_size=p.before_size,
+            after_size=p.after_size,
             output_complete=p.output_complete,
             history_storage_state=p.history_storage_state,
         )
@@ -644,7 +607,11 @@ async def get_history(
             cwd=act.request_json.get("cwd") if act.request_json else None,
             exit_code=act.result_json.get("exit_code") if act.result_json else None,
             file_path=act.request_json.get("path") if act.request_json else None,
-            file_change_type=None,
+            file_change_type=act.request_json.get("file_change_type") if act.request_json else None,
+            before_hash=act.result_json.get("before_hash") if act.result_json else None,
+            after_hash=act.result_json.get("after_hash") if act.result_json else None,
+            before_size=act.result_json.get("before_size") if act.result_json else None,
+            after_size=act.result_json.get("after_size") if act.result_json else None,
             output_complete=1,
             history_storage_state="pending",
         ))
@@ -656,14 +623,20 @@ async def get_history(
     items = items[:limit]
 
     # Get last_synced_at from cursor.
+    # Use .scalars().first() instead of .scalar_one_or_none() because a
+    # sandbox can be recreated, leaving stale cursor rows that cause
+    # MultipleResultsFound.  .scalars().first() returns the model instance
+    # (not a Row) and gracefully handles multiple rows by taking the latest.
     cursor_result = await session.execute(
         select(ConsumerCursor)
         .where(
             ConsumerCursor.connection_id == connection_id,
             ConsumerCursor.sandbox_id == sandbox_id,
         )
+        .order_by(ConsumerCursor.last_synced_at.desc())
+        .limit(1)
     )
-    cursor = cursor_result.scalar_one_or_none()
+    cursor = cursor_result.scalars().first()
 
     # Determine coverage: if we have a cursor with synced data, coverage is full.
     # Otherwise, only console activities are available.
@@ -684,6 +657,87 @@ async def get_history(
         total=len(items),
         last_synced_at=cursor.last_synced_at if cursor else None,
     )
+
+
+async def _fetch_output_from_sdk(
+    session: AsyncSession,
+    connection_id: str,
+    sandbox_id: str,
+    event_id: str,
+) -> dict[str, str | None]:
+    """Fetch command output (stdout/stderr) from the sandbox's Canonical History.
+
+    SDK operations store output in the ``command_output_chunks`` table inside
+    the sandbox, not in ``result_json``.  This function uses the cached
+    ``SandboxHistoryStore`` to call ``get_output()`` for both streams
+    **in parallel** (halving latency vs sequential calls).
+
+    Returns ``{"stdout": str|None, "stderr": str|None}``.  On any error,
+    returns ``{"stdout": None, "stderr": None}`` — best-effort, never raises.
+    """
+    try:
+        ref, adapter, _ = await get_sandbox_ref(session, connection_id, sandbox_id)
+        store = await get_history_store(
+            adapter, ref,
+            connection_id=ref.provider_key,
+            sandbox_id=ref.sandbox_id,
+        )
+        if store is None:
+            return {"stdout": None, "stderr": None}
+
+        async def _fetch_stream(stream: str) -> str | None:
+            try:
+                resp = await store.get_output(event_id, stream)
+                if isinstance(resp, dict):
+                    chunks = resp.get("chunks", [])
+                    if chunks:
+                        parts = []
+                        for chunk in chunks:
+                            data_b64 = chunk.get("data_base64", "")
+                            if data_b64:
+                                parts.append(
+                                    base64.b64decode(data_b64).decode(
+                                        "utf-8", errors="replace"
+                                    )
+                                )
+                        return "".join(parts)
+            except Exception:
+                pass
+            return None
+
+        # Fetch both streams in parallel to halve latency.
+        stdout, stderr = await asyncio.gather(
+            _fetch_stream("stdout"),
+            _fetch_stream("stderr"),
+        )
+        return {"stdout": stdout, "stderr": stderr}
+    except Exception:
+        return {"stdout": None, "stderr": None}
+
+
+async def _cache_output_in_projection(
+    session: AsyncSession,
+    projection: HistoryProjection,
+    stdout: str | None,
+    stderr: str | None,
+) -> None:
+    """Write fetched stdout/stderr back into the projection's result_json.
+
+    This is a cache-back mechanism: the first time a user views an event
+    detail, the output is fetched from the sandbox (slow).  By persisting
+    it into result_json, subsequent views read from the local database
+    (fast) — no network round-trip needed.
+    """
+    try:
+        result = dict(projection.result_json or {})
+        if stdout is not None:
+            result["stdout"] = stdout
+        if stderr is not None:
+            result["stderr"] = stderr
+        projection.result_json = result
+        await session.commit()
+    except Exception:
+        pass  # Best-effort cache; don't fail the request.
 
 
 async def get_history_event(
@@ -723,6 +777,10 @@ async def get_history_event(
             exit_code=p.exit_code,
             file_path=p.file_path,
             file_change_type=p.file_change_type,
+            before_hash=p.before_hash,
+            after_hash=p.after_hash,
+            before_size=p.before_size,
+            after_size=p.after_size,
             output_complete=p.output_complete,
             history_storage_state=p.history_storage_state,
         )
@@ -732,6 +790,22 @@ async def get_history_event(
         if p.result_json:
             stdout = p.result_json.get("stdout")
             stderr = p.result_json.get("stderr")
+
+        # If stdout/stderr are not in result_json (typical for SDK operations
+        # where output is stored in command_output_chunks table), try to
+        # fetch them from the sandbox's Canonical History via get_output.
+        # The fetched output is cached back into the projection's result_json
+        # so subsequent views don't need another network round-trip.
+        if stdout is None and stderr is None and p.operation_type.startswith("command"):
+            fetched = await _fetch_output_from_sdk(
+                session, connection_id, sandbox_id, p.event_id,
+            )
+            stdout = fetched.get("stdout")
+            stderr = fetched.get("stderr")
+            # Cache the fetched output back into projection to avoid
+            # re-fetching on subsequent views.
+            if stdout is not None or stderr is not None:
+                await _cache_output_in_projection(session, p, stdout, stderr)
 
         return HistoryEventDetail(
             event=event,
@@ -781,7 +855,11 @@ async def get_history_event(
         cwd=act.request_json.get("cwd") if act.request_json else None,
         exit_code=act.result_json.get("exit_code") if act.result_json else None,
         file_path=act.request_json.get("path") if act.request_json else None,
-        file_change_type=None,
+        file_change_type=act.request_json.get("file_change_type") if act.request_json else None,
+        before_hash=act.result_json.get("before_hash") if act.result_json else None,
+        after_hash=act.result_json.get("after_hash") if act.result_json else None,
+        before_size=act.result_json.get("before_size") if act.result_json else None,
+        after_size=act.result_json.get("after_size") if act.result_json else None,
         output_complete=1,
         history_storage_state="pending",
     )
@@ -811,20 +889,29 @@ async def get_availability(
             ConsumerCursor.connection_id == connection_id,
             ConsumerCursor.sandbox_id == sandbox_id,
         )
+        .order_by(ConsumerCursor.last_synced_at.desc())
+        .limit(1)
     )
-    cursor = cursor_result.scalar_one_or_none()
+    cursor = cursor_result.scalars().first()
 
     # Check adapter type — determine history availability.
-    _, adapter, _ = await get_sandbox_ref(session, connection_id, sandbox_id)
-    if isinstance(adapter, (FakeAdapter, OpenSandboxConsoleAdapter)):
-        return HistoryAvailability(
-            available=True,
-            reason=None,
-            last_synced_at=cursor.last_synced_at if cursor else None,
-        )
-    else:
+    try:
+        _, adapter, _ = await get_sandbox_ref(session, connection_id, sandbox_id)
+        if isinstance(adapter, (FakeAdapter, OpenSandboxConsoleAdapter)):
+            return HistoryAvailability(
+                available=True,
+                reason=None,
+                last_synced_at=cursor.last_synced_at if cursor else None,
+            )
+        else:
+            return HistoryAvailability(
+                available=False,
+                reason="History Helper is not yet implemented for this connection type",
+                last_synced_at=cursor.last_synced_at if cursor else None,
+            )
+    except Exception as exc:
         return HistoryAvailability(
             available=False,
-            reason="History Helper is not yet implemented for this connection type",
+            reason=f"Failed to check availability: {exc}",
             last_synced_at=cursor.last_synced_at if cursor else None,
         )

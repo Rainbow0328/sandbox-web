@@ -46,7 +46,7 @@ RUN mkdir -p /data && \
 
 # Environment defaults
 ENV EXPLORER_HOST=0.0.0.0
-ENV EXPLORER_PORT=8080
+ENV EXPLORER_PORT=9090
 ENV EXPLORER_DATABASE_URL=sqlite+aiosqlite:////data/explorer.db
 ENV EXPLORER_STATIC_DIR=/app/frontend/static
 ENV PYTHONUNBUFFERED=1
@@ -57,7 +57,7 @@ USER explorer
 EXPOSE ${EXPLORER_PORT}
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python -c "import urllib.request, os; urllib.request.urlopen(f'http://localhost:{os.environ.get(\"EXPLORER_PORT\", \"8080\")}/healthz')" || exit 1
+    CMD python -c "import urllib.request, os; urllib.request.urlopen(f'http://localhost:{os.environ.get(\"EXPLORER_PORT\", \"9090\")}/healthz')" || exit 1
 
 # Shell form so $EXPLORER_HOST and $EXPLORER_PORT are expanded at runtime.
 ENTRYPOINT python -m uvicorn app.main:app --host ${EXPLORER_HOST} --port ${EXPLORER_PORT}

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import secrets
+import time
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -24,7 +26,7 @@ class Settings(BaseSettings):
     )
 
     # --- Deployment identity ---
-    public_url: str = "http://localhost:8088"
+    public_url: str = "http://localhost:9090"
     admin_token: str = Field(default="", description="Admin bearer token (empty = auth disabled)")
     master_key: str = Field(
         default="0" * 64,
@@ -37,7 +39,7 @@ class Settings(BaseSettings):
 
     # --- Server ---
     host: str = "0.0.0.0"
-    port: int = 8080
+    port: int = 9090
     workers: int = 1
 
     # --- History ---
@@ -91,9 +93,6 @@ class Settings(BaseSettings):
 
 def _generate_deployment_id() -> str:
     """Generate a random deployment identifier (ULID-like)."""
-    import secrets
-    import time
-
     ts = int(time.time())
     rand = secrets.token_hex(8)
     return f"dep_{ts:x}_{rand}"

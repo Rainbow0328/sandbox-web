@@ -69,7 +69,7 @@ export function FilesTab({ connectionId, sandboxId, workdir }: FilesTabProps) {
     setDirty(false);
   };
 
-  // --- Upload ---\n
+  // --- Upload ---
   const fileInputRef = useRef<HTMLInputElement>(null);
   const sessionToken = useAuthStore((s) => s.sessionToken);
   const [showUploadDialog, setShowUploadDialog] = useState(false);
@@ -169,7 +169,7 @@ export function FilesTab({ connectionId, sandboxId, workdir }: FilesTabProps) {
       setNewFolderError('Invalid folder name');
       return;
     }
-    const folderPath = `${workdir}/${cleanName}`;
+    const folderPath = workdir === '/' ? `/${cleanName}` : `${workdir}/${cleanName}`;
     newFolderMutation.mutate(folderPath);
   };
 
@@ -432,7 +432,7 @@ function UploadDialog({
           </button>
           <button
             type="button"
-            onClick={() => onConfirm(`${selectedDir}/${file.name}`)}
+            onClick={() => onConfirm(selectedDir === '/' ? `/${file.name}` : `${selectedDir}/${file.name}`)}
             className="btn-primary"
             disabled={isUploading}
           >
@@ -477,6 +477,8 @@ function FolderPicker({
 
   // Breadcrumb path segments for navigation.
   const segments = browsingDir.replace(/^\//, '').split('/').filter(Boolean);
+  // Root label: show '/' when workdir is root, otherwise the last segment.
+  const rootLabel = workdir === '/' ? '/' : (workdir.split('/').pop() || '/');
   // Build cumulative paths for breadcrumbs.
   const breadcrumbs: { label: string; path: string }[] = [];
   let acc = '';
@@ -496,7 +498,7 @@ function FolderPicker({
           }}
           className="text-primary hover:underline"
         >
-          workspace
+          {rootLabel}
         </button>
         {breadcrumbs.map((bc) => (
           <span key={bc.path} className="flex items-center gap-1">

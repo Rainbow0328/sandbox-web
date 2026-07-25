@@ -18,6 +18,8 @@ Design principles:
 from __future__ import annotations
 
 import logging
+import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -71,11 +73,12 @@ async def write_operation_to_sandbox_history(
 
     store = None
     try:
-        store = await _create_sdk_store(adapter, ref)
+        from app.history.store_pool import get_history_store
+        store = await get_history_store(adapter, ref, connection_id=ref.provider_key, sandbox_id=ref.sandbox_id)
         if store is None:
             return None
 
-        # Build the operation event payload for the SDK.
+        # Build the SDK OperationEvent object.
         event = _build_operation_event(
             operation_type=operation_type,
             status=status,
@@ -83,7 +86,6 @@ async def write_operation_to_sandbox_history(
             request_payload=request_payload,
             result_payload=result_payload,
             occurred_at=activity.occurred_at,
-            completed_at=activity.completed_at,
             duration_ms=duration_ms or activity.duration_ms,
             command=command,
             cwd=cwd,
@@ -96,8 +98,8 @@ async def write_operation_to_sandbox_history(
             after_size=after_size,
         )
 
-        # Write to sandbox history via the SDK store.
-        event_id = await _write_event(store, event)
+        # Write to sandbox history via the SDK store's append() method.
+        event_id = await _write_event(store, event, ref)
 
         if event_id:
             # Update the console_activities row with the event_id and mark as written.
@@ -126,45 +128,6 @@ async def write_operation_to_sandbox_history(
             pass
         return None
 
-    finally:
-        if store is not None:
-            try:
-                await store.close()
-            except Exception:
-                pass
-
-
-async def _create_sdk_store(adapter, ref):
-    """Create a SandboxHistoryStore for writing to sandbox history."""
-    try:
-        from agent_sandbox_backends.history.config import (
-            HistoryConfig,
-            HistoryConsistency,
-            HistoryMode,
-        )
-        from agent_sandbox_backends.history.provider_transport import (
-            ProviderHistoryHelperTransport,
-        )
-        from agent_sandbox_backends.history.sandbox import SandboxHistoryStore
-        from agent_sandbox_backends.version import SDK_VERSION
-
-        sdk_provider = adapter.sdk_provider
-        sdk_ref = adapter.to_sdk_ref(ref)
-        transport = ProviderHistoryHelperTransport(sdk_provider, sdk_ref)
-        store = SandboxHistoryStore(
-            transport,
-            sdk_version=SDK_VERSION,
-            config=HistoryConfig(
-                mode=HistoryMode.SANDBOX,
-                consistency=HistoryConsistency.BEST_EFFORT,
-            ),
-        )
-        await store.initialize()
-        return store
-    except Exception as exc:
-        logger.warning("_create_sdk_store: failed to create store: %s", exc)
-        return None
-
 
 def _build_operation_event(
     *,
@@ -174,7 +137,6 @@ def _build_operation_event(
     request_payload: dict[str, Any] | None = None,
     result_payload: dict[str, Any] | None = None,
     occurred_at: str,
-    completed_at: str | None = None,
     duration_ms: int | None = None,
     command: str | None = None,
     cwd: str | None = None,
@@ -185,83 +147,127 @@ def _build_operation_event(
     after_hash: str | None = None,
     before_size: int | None = None,
     after_size: int | None = None,
-) -> dict[str, Any]:
-    """Build an operation event dict for the SDK's history store.
+) -> Any:
+    """Build an SDK ``OperationEvent`` object for the history store.
 
-    The structure mirrors the SDK's ``OperationEvent`` schema, with Console
-    as the source.
+    The SDK's ``SandboxHistoryStore.append()`` expects an ``OperationEvent``
+    pydantic model, not a raw dict.  We construct it here using the SDK's
+    own domain types so encoding is handled correctly.
     """
-    event: dict[str, Any] = {
-        "source": "console",
-        "actor_type": "user",
-        "actor_id": actor_id,
-        "operation_type": operation_type,
-        "status": status,
-        "occurred_at": occurred_at,
-        "completed_at": completed_at,
-        "duration_ms": duration_ms,
-        "request": request_payload,
-        "result": result_payload,
-        "schema_version": 1,
-    }
+    from agent_sandbox_backends.domain.context import ActorContext
+    from agent_sandbox_backends.history.encoding import (
+        OperationEvent,
+        OperationStatus,
+    )
 
-    # Attach command fields if present.
-    if command is not None or cwd is not None or exit_code is not None:
-        event["command"] = {
-            "command": command,
-            "cwd": cwd,
-            "exit_code": exit_code,
-            "output_complete": 1,
-            "history_storage_state": "complete",
-        }
+    # Map our status strings to SDK OperationStatus enum.
+    status_lower = status.lower()
+    if status_lower in ("succeeded", "success", "completed"):
+        op_status = OperationStatus.SUCCEEDED
+    elif status_lower in ("failed", "error"):
+        op_status = OperationStatus.FAILED
+    elif status_lower in ("running", "pending", "started"):
+        op_status = OperationStatus.STARTED
+    elif status_lower in ("cancelled", "canceled"):
+        op_status = OperationStatus.CANCELLED
+    elif status_lower == "timeout":
+        op_status = OperationStatus.TIMEOUT
+    else:
+        op_status = OperationStatus.SUCCEEDED
 
-    # Attach file operation fields if present.
-    if file_path is not None or file_change_type is not None:
-        event["file_operation"] = {
-            "file_path": file_path,
-            "change_type": file_change_type,
-            "before_hash": before_hash,
-            "after_hash": after_hash,
-            "before_size": before_size,
-            "after_size": after_size,
-        }
+    # Parse the ISO timestamp.
+    try:
+        if occurred_at.endswith("Z"):
+            occurred_dt = datetime.fromisoformat(occurred_at.replace("Z", "+00:00"))
+        else:
+            occurred_dt = datetime.fromisoformat(occurred_at)
+    except Exception:
+        occurred_dt = datetime.now(timezone.utc)
 
-    return event
+    # Build request payload with command/file info embedded.
+    request: dict[str, Any] = dict(request_payload or {})
+    if command is not None:
+        request["command"] = command
+    if cwd is not None:
+        request["cwd"] = cwd
+    if exit_code is not None:
+        request["exit_code"] = exit_code
+    if file_path is not None:
+        request["file_path"] = file_path
+    if file_change_type is not None:
+        request["file_change_type"] = file_change_type
+
+    # Build result payload.
+    result: dict[str, Any] | None = dict(result_payload) if result_payload else None
+    if after_hash is not None:
+        result = result or {}
+        result["after_hash"] = after_hash
+    if before_hash is not None:
+        result = result or {}
+        result["before_hash"] = before_hash
+
+    actor = ActorContext(
+        actor_type="user",
+        actor_id=actor_id,
+    )
+
+    event_id = str(uuid.uuid4())
+
+    return OperationEvent(
+        event_id=event_id,
+        occurred_at=occurred_dt,
+        operation_type=operation_type,
+        status=op_status,
+        actor=actor,
+        request=request,
+        result=result,
+        duration_ms=duration_ms,
+        schema_version=1,
+    )
 
 
-async def _write_event(store, event: dict[str, Any]) -> str | None:
+async def _write_event(store, event: Any, ref: SandboxRef) -> str | None:
     """Write an operation event to the sandbox history store.
 
-    Uses the SDK's ``record_operation`` method if available.
+    The SDK's helper requires a STARTED event to exist before a COMPLETED
+    event can be applied.  Console operations only create a single terminal
+    event, so we synthesize a STARTED event first, then send the real
+    COMPLETED event.
+
     Returns the ``event_id`` on success, or ``None`` on failure.
     """
     try:
-        # The SDK's SandboxHistoryStore may expose different write methods
-        # depending on version. We try the most likely ones.
-        if hasattr(store, "record_operation"):
-            result = await store.record_operation(event)
-            if isinstance(result, dict):
-                return result.get("event_id")
-            elif isinstance(result, str):
-                return result
-        elif hasattr(store, "write_operation"):
-            result = await store.write_operation(event)
-            if isinstance(result, dict):
-                return result.get("event_id")
-            elif isinstance(result, str):
-                return result
-        elif hasattr(store, "append_operation"):
-            result = await store.append_operation(event)
-            if isinstance(result, dict):
-                return result.get("event_id")
-            elif isinstance(result, str):
-                return result
-        else:
-            logger.warning(
-                "_write_event: SandboxHistoryStore has no known write method "
-                "(record_operation/write_operation/append_operation)"
-            )
-            return None
+        from agent_sandbox_backends.domain.operations import OperationStatus
+
+        event_id = getattr(event, "event_id", None)
+
+        # If the event is terminal, send a STARTED first so the helper
+        # can create the history_events row before we update it.
+        if event.status != OperationStatus.STARTED:
+            started_event = event.model_copy(update={
+                "status": OperationStatus.STARTED,
+                "result": None,
+                "duration_ms": None,
+                "error_code": None,
+            })
+            try:
+                await store.append(started_event)
+            except Exception as started_exc:
+                # STARTED might fail if the event already exists (e.g.
+                # from a previous retry).  Log and continue — the
+                # COMPLETED event will still work.
+                logger.debug(
+                    "_write_event: STARTED phase failed (may be OK): %s",
+                    started_exc,
+                )
+
+        # Now send the real (terminal) event.
+        await store.append(event)
+        logger.info(
+            "_write_event: successfully wrote event %s for sandbox %s",
+            event_id, ref.sandbox_id,
+        )
+        return event_id
     except Exception as exc:
         logger.warning("_write_event: failed to write event: %s", exc)
         return None

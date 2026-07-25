@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import difflib
 import hashlib
 import posixpath
 from datetime import UTC, datetime
@@ -12,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.adapters import SandboxAdapter
 from app.adapters.base import FileKind, SandboxRef, WriteFileRequest
 from app.core.errors import PathEscapeError, SandboxNotFoundError
+from app.history.writer import write_operation_to_sandbox_history
 from app.models.connection import Connection
 from app.models.console_activity import ConsoleActivity
 from app.schemas.file import (
@@ -47,15 +49,32 @@ def _now_iso() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
-def normalize_path(path: str, workdir: str = "/workspace") -> str:
-    """Normalize a POSIX path and reject escapes outside the workdir.
+def normalize_path(path: str, workdir: str = "/") -> str:
+    """Normalize a POSIX path.
 
-    (对齐 §15.3) All paths entering the sandbox are normalized with
-    ``posixpath.normpath``. ``..`` traversal that escapes the workdir
-    raises ``PathEscapeError``.
+    Paths are normalized with ``posixpath.normpath`` to resolve ``..``
+    segments.  When the path is empty or ``/`` it defaults to ``workdir``.
+    Relative paths are resolved against ``workdir``.
+
+    Unlike a strict jail, this function allows browsing any absolute path
+    so users can explore the full filesystem (e.g. ``/home``, ``/etc``)
+    when a sandbox was created externally with a custom working directory.
+
+    However, ``..`` segments in the *original* path are rejected to prevent
+    path traversal attacks.  Users can still access any directory by
+    specifying its absolute path directly.
     """
     if not path or path == "/":
         return workdir
+
+    # Reject paths containing .. segments to prevent traversal attacks.
+    # Users should specify absolute paths directly instead.
+    parts = path.split("/")
+    if ".." in parts:
+        raise PathEscapeError(
+            f"Path '{path}' contains '..' segments",
+            details={"path": path},
+        )
 
     # Ensure path is absolute.
     if not path.startswith("/"):
@@ -63,13 +82,10 @@ def normalize_path(path: str, workdir: str = "/workspace") -> str:
 
     normalized = posixpath.normpath(path)
 
-    # Check for escape outside workdir.
-    workdir_norm = posixpath.normpath(workdir)
-    if not (normalized == workdir_norm or normalized.startswith(workdir_norm + "/")):
-        raise PathEscapeError(
-            f"Path '{path}' escapes the allowed directory '{workdir}'",
-            details={"path": path, "workdir": workdir_norm, "normalized": normalized},
-        )
+    # Guard against trivial escape (e.g. "/../../etc") — normpath already
+    # collapses leading ``..`` so the result always starts with ``/``.
+    if not normalized.startswith("/"):
+        normalized = "/" + normalized
 
     return normalized
 
@@ -169,10 +185,15 @@ async def list_files(
 ) -> FileListResponse:
     """List files in a directory."""
     ref, adapter, connection = await get_sandbox_ref(session, connection_id, sandbox_id)
-    workdir = connection.default_workdir or "/workspace"
+    workdir = connection.default_workdir or "/"
     norm_path = normalize_path(path, workdir)
 
-    entries = await adapter.list_files(ref, norm_path)
+    # Gracefully handle non-existent directories: return an empty list
+    # instead of propagating a 500 error.
+    try:
+        entries = await adapter.list_files(ref, norm_path)
+    except Exception:
+        entries = []
 
     # NOTE: file.list is a read-only operation — not logged to history.
 
@@ -199,7 +220,7 @@ async def read_file(
 ) -> FileContentResponse:
     """Read file content."""
     ref, adapter, connection = await get_sandbox_ref(session, connection_id, sandbox_id)
-    workdir = connection.default_workdir or "/workspace"
+    workdir = connection.default_workdir or "/"
     norm_path = normalize_path(path, workdir)
 
     content_bytes = await adapter.read_file(ref, norm_path)
@@ -235,7 +256,7 @@ async def write_file(
 ) -> FileWriteResponse:
     """Write file content with optimistic concurrency control."""
     ref, adapter, connection = await get_sandbox_ref(session, connection_id, sandbox_id)
-    workdir = connection.default_workdir or "/workspace"
+    workdir = connection.default_workdir or "/"
     norm_path = normalize_path(path, workdir)
 
     content_bytes = content.encode("utf-8")
@@ -244,26 +265,83 @@ async def write_file(
         content=content_bytes,
         expected_hash=expected_hash,
     )
+
+    # For edits (expected_hash is set), read old content to generate
+    # a unified diff instead of recording the full file content.
+    is_edit = expected_hash is not None
+    diff_text: str | None = None
+    diff_truncated = False
+    if is_edit:
+        try:
+            old_bytes = await adapter.read_file(ref, norm_path)
+            try:
+                old_text = old_bytes.decode("utf-8")
+                new_text = content
+                diff_lines = list(
+                    difflib.unified_diff(
+                        old_text.splitlines(keepends=True),
+                        new_text.splitlines(keepends=True),
+                        fromfile=f"{norm_path} (before)",
+                        tofile=f"{norm_path} (after)",
+                    )
+                )
+                if diff_lines:
+                    # Ensure every line ends with \n — difflib omits trailing
+                    # \n on the last content line when the source text doesn't
+                    # end with a newline, causing lines like "-hello+world"
+                    # to concatenate.
+                    diff_text = "".join(
+                        line if line.endswith("\n") else line + "\n"
+                        for line in diff_lines
+                    )
+                    _MAX_DIFF = 65536
+                    diff_truncated = len(diff_text.encode("utf-8")) > _MAX_DIFF
+                    if diff_truncated:
+                        diff_text = diff_text[:_MAX_DIFF]
+                        diff_text += "\n... [diff truncated]\n"
+            except UnicodeDecodeError:
+                pass  # Binary file, skip diff.
+        except Exception:
+            pass  # File may not exist yet; skip diff.
+
     result = await adapter.write_file(ref, request)
 
     # Log activity — history_state stays "pending" until history writer updates it.
+    _MAX_CONTENT_PREVIEW = 10_000
+
+    # Build result payload: include diff for edits, content preview for new files.
+    result_payload: dict = {
+        "hash": result.entry.content_hash,
+        "previous_hash": result.previous_hash,
+        "after_hash": result.entry.content_hash,
+        "after_size": len(content_bytes),
+        "before_hash": result.previous_hash,
+    }
+    if is_edit and diff_text:
+        result_payload["diff"] = diff_text
+        result_payload["diff_truncated"] = diff_truncated
+    else:
+        result_payload["content"] = content[:_MAX_CONTENT_PREVIEW]
+        result_payload["content_truncated"] = len(content) > _MAX_CONTENT_PREVIEW
+        result_payload["content_size"] = len(content)
+
     activity = await _log_activity(
         session, connection_id, sandbox_id, actor_id,
         "file.write", "succeeded",
         {"path": norm_path, "expected_hash": expected_hash},
-        {"hash": result.entry.content_hash, "previous_hash": result.previous_hash},
+        result_payload,
     )
 
     # Best-effort write to sandbox history.
-    from app.history.writer import write_operation_to_sandbox_history
     await write_operation_to_sandbox_history(
         session, ref, adapter, activity,
         operation_type="file.write",
         status="succeeded",
         request_payload={"path": norm_path, "expected_hash": expected_hash},
-        result_payload={"hash": result.entry.content_hash, "previous_hash": result.previous_hash},
+        result_payload=result_payload,
         file_path=norm_path,
         file_change_type="write",
+        before_hash=result.previous_hash,
         after_hash=result.entry.content_hash,
         after_size=len(content_bytes),
     )
@@ -285,7 +363,7 @@ async def delete_file(
 ) -> None:
     """Delete a file."""
     ref, adapter, connection = await get_sandbox_ref(session, connection_id, sandbox_id)
-    workdir = connection.default_workdir or "/workspace"
+    workdir = connection.default_workdir or "/"
     norm_path = normalize_path(path, workdir)
 
     await adapter.delete_file(ref, norm_path)
@@ -296,7 +374,6 @@ async def delete_file(
     )
 
     # Best-effort write to sandbox history.
-    from app.history.writer import write_operation_to_sandbox_history
     await write_operation_to_sandbox_history(
         session, ref, adapter, activity,
         operation_type="file.delete",
@@ -315,7 +392,7 @@ async def download_file(
 ) -> tuple[bytes, str, int]:
     """Download a file as raw bytes. Returns (content, hash, size)."""
     ref, adapter, connection = await get_sandbox_ref(session, connection_id, sandbox_id)
-    workdir = connection.default_workdir or "/workspace"
+    workdir = connection.default_workdir or "/"
     norm_path = normalize_path(path, workdir)
 
     content = await adapter.read_file(ref, norm_path)
@@ -333,7 +410,7 @@ async def upload_file(
 ) -> FileWriteResponse:
     """Upload a file (binary content)."""
     ref, adapter, connection = await get_sandbox_ref(session, connection_id, sandbox_id)
-    workdir = connection.default_workdir or "/workspace"
+    workdir = connection.default_workdir or "/"
     norm_path = normalize_path(path, workdir)
 
     request = WriteFileRequest(path=norm_path, content=content)
@@ -347,7 +424,6 @@ async def upload_file(
     )
 
     # Best-effort write to sandbox history.
-    from app.history.writer import write_operation_to_sandbox_history
     await write_operation_to_sandbox_history(
         session, ref, adapter, activity,
         operation_type="file.upload",

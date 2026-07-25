@@ -29,7 +29,7 @@ export function SandboxDetailPage() {
     queryFn: () =>
       api.get<SandboxInfo>(`/connections/${connectionId}/sandboxes/${sandboxId}`),
     enabled: !!connectionId && !!sandboxId,
-    refetchInterval: 10_000,
+    refetchInterval: 30_000,
   });
 
   const { data: capabilities } = useQuery({
@@ -171,10 +171,10 @@ export function SandboxDetailPage() {
           </div>
         )}
         {tab === 'files' && connectionId && sandboxId && (
-          <FilesTab connectionId={connectionId} sandboxId={sandboxId} workdir={sandbox?.workdir ?? '/workspace'} />
+          <FilesTab connectionId={connectionId} sandboxId={sandboxId} workdir="/" />
         )}
         {tab === 'commands' && connectionId && sandboxId && (
-          <CommandsTab connectionId={connectionId} sandboxId={sandboxId} workdir={sandbox?.workdir ?? '/workspace'} />
+          <CommandsTab connectionId={connectionId} sandboxId={sandboxId} workdir="/" />
         )}
         {tab === 'history' && connectionId && sandboxId && (
           <HistoryTab connectionId={connectionId} sandboxId={sandboxId} />

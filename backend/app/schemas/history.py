@@ -27,6 +27,10 @@ class HistoryEvent(BaseModel):
     exit_code: int | None = None
     file_path: str | None = None
     file_change_type: str | None = None
+    before_hash: str | None = None
+    after_hash: str | None = None
+    before_size: int | None = None
+    after_size: int | None = None
     output_complete: int = 1
     history_storage_state: str = "complete"
 

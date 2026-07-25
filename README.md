@@ -24,11 +24,13 @@ Built with FastAPI (backend) + React/TypeScript (frontend), packaged as a single
 ### Launch (One Command)
 
 ```bash
-python start.py          # Production: build frontend + serve on http://localhost:8080
-python start.py --dev    # Development: hot-reload frontend (:5173) + backend (:8080)
+python start.py          # Production: build frontend + serve on http://localhost:9090
+python start.py --dev    # Development: hot-reload frontend (:5173) + backend (:9090)
 ```
 
-That's it. No environment variables required for local development — auth is disabled by default. Open `http://localhost:8080` (production) or `http://localhost:5173` (dev) in your browser.
+That's it. No environment variables required for local development — auth is disabled by default. Open `http://localhost:9090` (production) or `http://localhost:5173` (dev) in your browser.
+
+> **Note:** The Console defaults to port **9090** to avoid conflicting with the OpenSandbox service which runs on port **8080**.
 
 ### Docker
 
@@ -39,7 +41,7 @@ That's it. No environment variables required for local development — auth is d
 docker build -f sandbox-console/docker/Dockerfile -t sandbox-explorer .
 
 # Run
-docker run -d -p 8080:8080 -v sandbox-explorer-data:/data sandbox-explorer
+docker run -d -p 9090:9090 -v sandbox-explorer-data:/data sandbox-explorer
 ```
 
 Or with Docker Compose:
@@ -55,7 +57,7 @@ Ports can be configured via **CLI flags**, **environment variables**, or **`.env
 
 | Parameter | CLI Flag | Env Variable | Default | Mode |
 |---|---|---|---|---|
-| Backend port | `--port` | `EXPLORER_PORT` | `8080` | All |
+| Backend port | `--port` | `EXPLORER_PORT` | `9090` | All |
 | Backend host | `--host` | `EXPLORER_HOST` | `0.0.0.0` | All |
 | Frontend port | `--frontend-port` | `EXPLORER_FRONTEND_PORT` | `5173` | Dev only |
 
@@ -85,10 +87,10 @@ All configuration via environment variables (prefix `EXPLORER_`). See [`.env.exa
 | `EXPLORER_ADMIN_TOKEN` | (empty) | Admin bearer token (empty = auth disabled) |
 | `EXPLORER_MASTER_KEY` | all-zeros | Fernet encryption key (64-char hex) |
 | `EXPLORER_DATABASE_URL` | `sqlite+aiosqlite:///./data/explorer.db` | Database URL |
-| `EXPLORER_PORT` | `8080` | Backend port |
+| `EXPLORER_PORT` | `9090` | Backend port (OpenSandbox service uses 8080) |
 | `EXPLORER_HOST` | `0.0.0.0` | Backend bind address |
 | `EXPLORER_FRONTEND_PORT` | `5173` | Frontend dev port (dev mode only) |
-| `EXPLORER_PUBLIC_URL` | `http://localhost:8080` | External URL |
+| `EXPLORER_PUBLIC_URL` | `http://localhost:9090` | External URL |
 | `EXPLORER_CORS_ORIGINS` | (empty) | Comma-separated CORS origins |
 
 ## API Overview

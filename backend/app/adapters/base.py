@@ -68,7 +68,7 @@ class SandboxRef:
 @dataclass(frozen=True)
 class CreateSandboxRequest:
     image: str = "python:3.12"
-    workdir: str = "/workspace"
+    workdir: str = "/"
     env: dict[str, str] = field(default_factory=dict)
     metadata: dict[str, str] = field(default_factory=dict)
     idempotency_key: str | None = None
@@ -79,7 +79,9 @@ class SandboxInfo:
     ref: SandboxRef
     state: SandboxState
     image: str | None = None
-    workdir: str = "/workspace"
+    workdir: str = "/"
+    created_at: str | None = None  # RFC3339
+    expires_at: str | None = None  # RFC3339
 
 
 # ---------------------------------------------------------------------------

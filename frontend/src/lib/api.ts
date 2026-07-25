@@ -100,6 +100,8 @@ export interface SandboxInfo {
   image: string | null;
   workdir: string;
   expires_at: string | null;
+  created_at: string | null;
+  last_activity_at: string | null;
   metadata: Record<string, string>;
 }
 
@@ -205,6 +207,10 @@ export interface HistoryEvent {
   exit_code: number | null;
   file_path: string | null;
   file_change_type: string | null;
+  before_hash: string | null;
+  after_hash: string | null;
+  before_size: number | null;
+  after_size: number | null;
   output_complete: number;
   history_storage_state: string;
 }

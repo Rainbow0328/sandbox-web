@@ -6,8 +6,8 @@ export default defineConfig(({ mode }) => {
   // loadEnv reads from .env, .env.local, etc. using an empty prefix to capture all vars.
   const env = loadEnv(mode, path.resolve(__dirname, '..'), '');
 
-  // Backend port for the dev-server proxy target (default: 8080).
-  const backendPort = env.EXPLORER_PORT || '8080';
+  // Backend port for the dev-server proxy target (default: 9090, same as start.py).
+  const backendPort = env.EXPLORER_PORT || '9090';
   // Frontend dev server port (default: 5173).
   const frontendPort = parseInt(env.EXPLORER_FRONTEND_PORT || '5173', 10);
 

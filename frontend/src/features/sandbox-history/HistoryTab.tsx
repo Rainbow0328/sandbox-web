@@ -1,7 +1,6 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
-  History as HistoryIcon,
   RefreshCw,
   X,
   Clock,
@@ -12,7 +11,6 @@ import {
   Terminal,
   FileText,
   Package,
-  ChevronDown,
   ChevronRight,
 } from 'lucide-react';
 import { api, type HistoryResponse, type HistoryEventDetail } from '@/lib/api';
@@ -89,6 +87,36 @@ export function HistoryTab({ connectionId, sandboxId }: HistoryTabProps) {
   const [filterActor, setFilterActor] = useState('');
   const [filterSource, setFilterSource] = useState('');
   const queryClient = useQueryClient();
+  const hasAutoSynced = useRef(false);
+  const lastSyncTs = useRef(0);
+
+  // Auto-trigger history sync when the tab is first opened, and periodically
+  // thereafter.  Uses a 60-second minimum interval to avoid flooding the
+  // sandbox with helper commands.  The backend also has a 5-second throttle
+  // as a second line of defense.
+  useEffect(() => {
+    const doSync = () => {
+      const now = Date.now();
+      if (now - lastSyncTs.current < 60_000) return;
+      lastSyncTs.current = now;
+      api
+        .post(`/sandboxes/${connectionId}/${sandboxId}/history/sync`)
+        .then(() => {
+          queryClient.invalidateQueries({ queryKey: ['history', connectionId, sandboxId] });
+        })
+        .catch(() => {
+          // Silent failure — sync is best-effort.
+        });
+    };
+    // Sync on mount (first open).
+    if (!hasAutoSynced.current) {
+      hasAutoSynced.current = true;
+      doSync();
+    }
+    // Sync every 60 seconds.
+    const interval = setInterval(doSync, 60_000);
+    return () => clearInterval(interval);
+  }, [connectionId, sandboxId, queryClient]);
 
   const { data, isLoading, isFetching } = useQuery({
     queryKey: ['history', connectionId, sandboxId, filterType, filterStatus, filterActor, filterSource],
@@ -103,7 +131,8 @@ export function HistoryTab({ connectionId, sandboxId }: HistoryTabProps) {
         `/sandboxes/${connectionId}/${sandboxId}/history${qs ? `?${qs}` : ''}`,
       );
     },
-    refetchInterval: 30_000,
+    refetchInterval: 60_000,
+    staleTime: 30_000,
   });
 
   const syncMutation = useMutation({
@@ -121,6 +150,11 @@ export function HistoryTab({ connectionId, sandboxId }: HistoryTabProps) {
         `/sandboxes/${connectionId}/${sandboxId}/history/events/${selectedEventId}`,
       ),
     enabled: !!selectedEventId,
+    // Cache event detail for 2 minutes — the backend caches output in
+    // the projection after first fetch, so subsequent views are fast
+    // even after the cache expires.
+    staleTime: 120_000,
+    gcTime: 300_000,
   });
 
   const items = data?.items ?? [];
@@ -250,8 +284,14 @@ export function HistoryTab({ connectionId, sandboxId }: HistoryTabProps) {
                           {sourceLabels[item.source] ?? item.source}
                         </span>
                         {item.actor_id && (
-                          <span className="text-xs text-muted-foreground">
-                            · {item.actor_id}
+                          <span className={cn(
+                            'flex items-center gap-0.5 rounded px-1.5 py-0.5 text-xs font-medium',
+                            item.actor_type === 'agent'
+                              ? 'bg-purple-100 text-purple-700 dark:bg-purple-950 dark:text-purple-300'
+                              : 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300',
+                          )}>
+                            <Bot className="h-3 w-3" />
+                            {item.actor_id}
                           </span>
                         )}
                       </div>
@@ -328,11 +368,59 @@ function EventDetailPanel({
 }) {
   const e = detail.event;
 
+  const isFileOp = !!e.file_path;
+  const isCommandOp = !!e.command;
+
+  // Check if there's meaningful diff/content to show for file ops.
+  const diff = detail.result?.diff ?? detail.request?.diff;
+  const diffTruncated = Boolean(detail.result?.diff_truncated ?? detail.request?.diff_truncated);
+  const writtenContent = detail.result?.content ?? detail.request?.content;
+  const contentTruncated = Boolean(detail.result?.content_truncated ?? detail.request?.content_truncated);
+  const hasDiffOrContent = diff || writtenContent;
+
+  // For commands, check if there's output.
+  const hasOutput = detail.stdout || detail.stderr;
+
   return (
-    <div className="p-4">
-      {/* Header */}
-      <div className="mb-4 flex items-center justify-between">
-        <h3 className="text-base font-semibold">Event Detail</h3>
+    <div className="flex h-full flex-col">
+      {/* Compact header bar */}
+      <div className="flex items-center justify-between border-b px-4 py-2.5">
+        <div className="flex items-center gap-2 text-sm">
+          <span className="font-semibold">{e.operation_type}</span>
+          <span className={cn(
+            'rounded border px-1.5 py-0.5 text-xs font-medium',
+            statusColors[e.status] ?? '',
+          )}>
+            {e.status}
+          </span>
+          <span className="flex items-center gap-0.5 text-xs text-muted-foreground">
+            {(() => {
+              const SourceIcon = sourceIcons[e.source] ?? User;
+              return <SourceIcon className="h-3 w-3" />;
+            })()}
+            {sourceLabels[e.source] ?? e.source}
+          </span>
+          {e.actor_id && (
+            <span className={cn(
+              'flex items-center gap-0.5 rounded px-1.5 py-0.5 text-xs font-medium',
+              e.actor_type === 'agent'
+                ? 'bg-purple-100 text-purple-700 dark:bg-purple-950 dark:text-purple-300'
+                : 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300',
+            )}>
+              <Bot className="h-3 w-3" />
+              {e.actor_id}
+            </span>
+          )}
+          <span className="text-xs text-muted-foreground">{formatTime(e.occurred_at)}</span>
+          {e.duration_ms != null && (
+            <span className="text-xs text-muted-foreground">{formatDuration(e.duration_ms)}</span>
+          )}
+          {e.exit_code != null && (
+            <span className={cn('text-xs', e.exit_code === 0 ? 'text-green-600' : 'text-red-600')}>
+              exit: {e.exit_code}
+            </span>
+          )}
+        </div>
         <button
           onClick={onClose}
           className="text-muted-foreground hover:text-foreground"
@@ -341,103 +429,262 @@ function EventDetailPanel({
         </button>
       </div>
 
-      {/* Meta grid */}
-      <div className="mb-4 grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
-        <DetailField label="Event ID" value={e.event_id} mono />
-        <DetailField label="Source" value={sourceLabels[e.source] ?? e.source} />
-        <DetailField label="Actor" value={`${e.actor_type}: ${e.actor_id ?? '—'}`} />
-        <DetailField label="Operation" value={e.operation_type} />
-        <DetailField label="Status" value={e.status} />
-        <DetailField label="Occurred" value={formatTime(e.occurred_at)} />
-        {e.duration_ms != null && (
-          <DetailField label="Duration" value={formatDuration(e.duration_ms)} />
-        )}
-        {e.exit_code != null && (
-          <DetailField label="Exit Code" value={String(e.exit_code)} mono />
-        )}
-        {e.thread_id && <DetailField label="Thread" value={e.thread_id} mono />}
-        {e.run_id && <DetailField label="Run ID" value={e.run_id} mono />}
-        {e.cwd && <DetailField label="CWD" value={e.cwd} mono />}
-      </div>
-
-      {/* Command */}
-      {e.command && (
-        <Section title="Command">
-          <pre className="overflow-auto rounded bg-muted p-3 font-mono text-xs">
-            {e.command}
-          </pre>
-        </Section>
-      )}
-
-      {/* File info */}
-      {e.file_path && (
-        <Section title="File Operation">
-          <div className="space-y-1 text-sm">
-            <div><span className="text-muted-foreground">Path:</span> <code className="text-xs">{e.file_path}</code></div>
+      {/* Scrollable content area */}
+      <div className="flex-1 overflow-auto p-4">
+        {/* File path banner — prominent, shown for file operations */}
+        {isFileOp && (
+          <div className="mb-4 flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2">
+            <FileText className="h-4 w-4 shrink-0 text-muted-foreground" />
+            <code className="font-mono text-sm font-medium">{e.file_path}</code>
             {e.file_change_type && (
-              <div><span className="text-muted-foreground">Change:</span> {e.file_change_type}</div>
+              <span className="ml-auto rounded bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground">
+                {e.file_change_type}
+              </span>
             )}
           </div>
-        </Section>
-      )}
+        )}
 
-      {/* Request */}
-      {detail.request && Object.keys(detail.request).length > 0 && (
-        <Section title="Request">
-          <pre className="max-h-48 overflow-auto rounded bg-muted p-3 font-mono text-xs">
-            {JSON.stringify(detail.request, null, 2)}
-          </pre>
-        </Section>
-      )}
+        {/* Command — shown for command operations */}
+        {isCommandOp && (
+          <div className="mb-4">
+            <pre className="overflow-auto rounded bg-muted p-3 font-mono text-xs">
+              <span className="text-foreground/70">$ </span>
+              {e.command}
+            </pre>
+            {e.cwd && (
+              <div className="mt-1 text-xs text-muted-foreground">
+                cwd: <code className="font-mono">{e.cwd}</code>
+              </div>
+            )}
+          </div>
+        )}
 
-      {/* stdout */}
-      {detail.stdout && (
-        <Section title="stdout">
-          <pre className="max-h-64 overflow-auto rounded bg-gray-50 p-3 font-mono text-xs dark:bg-gray-900">
-            {detail.stdout}
-          </pre>
-        </Section>
-      )}
+        {/* Diff or written content for file operations */}
+        {isFileOp && Boolean(diff) && (
+          <div>
+            {diffTruncated && (
+              <div className="mb-1 text-xs text-amber-600">
+                Diff truncated (64KB limit)
+              </div>
+            )}
+            <DiffViewer diff={String(diff)} />
+          </div>
+        )}
 
-      {/* stderr */}
-      {detail.stderr && (
-        <Section title="stderr">
-          <pre className="max-h-64 overflow-auto rounded bg-red-50 p-3 font-mono text-xs text-red-900 dark:bg-red-950">
-            {detail.stderr}
-          </pre>
-        </Section>
-      )}
+        {isFileOp && !diff && Boolean(writtenContent) && (
+          <div>
+            <div className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              Written Content
+            </div>
+            {contentTruncated && (
+              <div className="mb-1 text-xs text-amber-600">
+                Content truncated (10KB limit)
+              </div>
+            )}
+            <pre className="overflow-auto rounded bg-gray-50 p-3 font-mono text-xs dark:bg-gray-900">
+              {String(writtenContent)}
+            </pre>
+          </div>
+        )}
 
-      {/* Result */}
-      {detail.result && Object.keys(detail.result).length > 0 && (
-        <Section title="Result">
-          <pre className="max-h-48 overflow-auto rounded bg-muted p-3 font-mono text-xs">
-            {JSON.stringify(detail.result, null, 2)}
-          </pre>
-        </Section>
-      )}
-    </div>
-  );
-}
+        {/* New file with no content preview */}
+        {isFileOp && !hasDiffOrContent && !Boolean(diff) && !Boolean(writtenContent) && (
+          <div className="py-4 text-center text-sm text-muted-foreground">
+            No content changes recorded.
+          </div>
+        )}
 
+        {/* stdout for command operations */}
+        {isCommandOp && detail.stdout && (
+          <div className="mb-4">
+            <div className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              stdout
+            </div>
+            {Boolean(detail.result?.output_truncated) && (
+              <div className="mb-1 text-xs text-amber-600">Output truncated (10KB limit per stream)</div>
+            )}
+            <pre className="max-h-[40vh] overflow-auto rounded bg-gray-50 p-3 font-mono text-xs dark:bg-gray-900">
+              {detail.stdout}
+            </pre>
+          </div>
+        )}
 
-function DetailField({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
-  return (
-    <div>
-      <div className="text-xs text-muted-foreground">{label}</div>
-      <div className={cn('text-sm', mono && 'font-mono text-xs')}>{value}</div>
-    </div>
-  );
-}
+        {/* stderr for command operations */}
+        {isCommandOp && detail.stderr && (
+          <div className="mb-4">
+            <div className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              stderr
+            </div>
+            {Boolean(detail.result?.output_truncated) && !detail.stdout && (
+              <div className="mb-1 text-xs text-amber-600">Output truncated (10KB limit per stream)</div>
+            )}
+            <pre className="max-h-[40vh] overflow-auto rounded bg-red-50 p-3 font-mono text-xs text-red-900 dark:bg-red-950">
+              {detail.stderr}
+            </pre>
+          </div>
+        )}
 
-
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <div className="mb-4">
-      <div className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-        {title}
+        {/* No output for commands */}
+        {isCommandOp && !hasOutput && (
+          <div className="py-4 text-center text-sm text-muted-foreground">
+            No output captured.
+          </div>
+        )}
       </div>
-      {children}
+    </div>
+  );
+}
+
+
+// ---------------------------------------------------------------------------
+// DiffViewer — parses unified diff text and renders a Git-style view with
+// line numbers, colored backgrounds for additions/deletions, and hunk
+// headers.
+// ---------------------------------------------------------------------------
+
+type DiffLineType = 'context' | 'add' | 'remove' | 'meta';
+
+interface DiffLine {
+  type: DiffLineType;
+  content: string;
+  oldLine: number | null;
+  newLine: number | null;
+}
+
+function parseUnifiedDiff(diff: string): DiffLine[] {
+  const lines = diff.split('\n');
+  const result: DiffLine[] = [];
+  let oldLine = 0;
+  let newLine = 0;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    // File headers: --- / +++ — skip these, the file path is already
+    // shown in the panel header above the diff.
+    if (line.startsWith('--- ') || line.startsWith('+++ ')) {
+      continue;
+    }
+
+    // Hunk header: @@ -A,B +C,D @@ — parse line numbers but skip
+    // rendering the header itself (it adds visual noise without value).
+    const hunkMatch = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+    if (hunkMatch) {
+      oldLine = parseInt(hunkMatch[1], 10);
+      newLine = parseInt(hunkMatch[2], 10);
+      continue;
+    }
+
+    // No-newline marker
+    if (line.startsWith('\\')) {
+      result.push({ type: 'meta', content: line, oldLine: null, newLine: null });
+      continue;
+    }
+
+    // Addition
+    if (line.startsWith('+')) {
+      result.push({
+        type: 'add',
+        content: line.slice(1),
+        oldLine: null,
+        newLine: newLine++,
+      });
+      continue;
+    }
+
+    // Deletion
+    if (line.startsWith('-')) {
+      result.push({
+        type: 'remove',
+        content: line.slice(1),
+        oldLine: oldLine++,
+        newLine: null,
+      });
+      continue;
+    }
+
+    // Context line (starts with space or is empty)
+    const content = line.startsWith(' ') ? line.slice(1) : line;
+    result.push({
+      type: 'context',
+      content,
+      oldLine: oldLine++,
+      newLine: newLine++,
+    });
+  }
+
+  return result;
+}
+
+const lineTypeStyles: Record<DiffLineType, { bg: string; prefix: string; text: string }> = {
+  context: { bg: '', prefix: 'text-muted-foreground/40', text: 'text-foreground/80' },
+  add: { bg: 'bg-green-50 dark:bg-green-950/40', prefix: 'text-green-600 dark:text-green-400', text: 'text-green-900 dark:text-green-100' },
+  remove: { bg: 'bg-red-50 dark:bg-red-950/40', prefix: 'text-red-600 dark:text-red-400', text: 'text-red-900 dark:text-red-100' },
+  meta: { bg: '', prefix: 'text-muted-foreground/50', text: 'text-muted-foreground italic' },
+};
+
+function DiffViewer({ diff }: { diff: string }) {
+  const lines = useMemo(() => parseUnifiedDiff(diff), [diff]);
+
+  // Compute stats
+  const stats = useMemo(() => {
+    let added = 0;
+    let removed = 0;
+    for (const l of lines) {
+      if (l.type === 'add') added++;
+      else if (l.type === 'remove') removed++;
+    }
+    return { added, removed };
+  }, [lines]);
+
+  return (
+    <div className="overflow-hidden rounded-lg border border-border">
+      {/* Stats bar */}
+      <div className="flex items-center gap-3 border-b bg-muted/30 px-3 py-1.5 text-xs">
+        <span className="font-mono">
+          <span className="text-green-600 dark:text-green-400">+{stats.added}</span>
+          {' '}
+          <span className="text-red-600 dark:text-red-400">-{stats.removed}</span>
+        </span>
+        <span className="text-muted-foreground">
+          {stats.added + stats.removed} lines changed
+        </span>
+      </div>
+
+      {/* Diff body */}
+      <div className="max-h-[28rem] overflow-auto font-mono text-xs">
+        <table className="w-full border-collapse">
+          <tbody>
+            {lines.map((line, idx) => {
+              const style = lineTypeStyles[line.type];
+              const prefix =
+                line.type === 'add' ? '+' :
+                line.type === 'remove' ? '-' :
+                '';
+              return (
+                <tr key={idx} className={cn('border-b border-border/30', style.bg)}>
+                  {/* Old line number */}
+                  <td className="w-12 select-none whitespace-nowrap border-r border-border/30 px-2 py-0 text-right align-top text-muted-foreground/50">
+                    {line.oldLine ?? ''}
+                  </td>
+                  {/* New line number */}
+                  <td className="w-12 select-none whitespace-nowrap border-r border-border/30 px-2 py-0 text-right align-top text-muted-foreground/50">
+                    {line.newLine ?? ''}
+                  </td>
+                  {/* +/- prefix */}
+                  <td className={cn('w-4 select-none px-1 py-0 text-center align-top', style.prefix)}>
+                    {prefix}
+                  </td>
+                  {/* Content */}
+                  <td className={cn('whitespace-pre-wrap break-all px-2 py-0 leading-5', style.text)}>
+                    {line.content || '\u00A0'}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

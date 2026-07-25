@@ -3,21 +3,72 @@
 from __future__ import annotations
 
 import contextlib
+import logging
+import os
 from collections.abc import AsyncIterator
-from datetime import UTC
+from datetime import UTC, datetime
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 from app.api.v1 import router as v1_router
 from app.core.config import get_settings
 from app.core.errors import ExplorerError, explorer_exception_handler
 from app.core.logging import configure_logging
 from app.db.base import Base
-from app.db.engine import dispose_engine, get_engine
+from app.db.engine import dispose_engine, get_engine, get_session_factory
+from app.history.store_pool import close_all_stores
+from app.models.system_meta import SystemMeta
 from app.observability.metrics import metrics_endpoint
+from app.services.connection_service import _adapter_cache
+
+logger = logging.getLogger(__name__)
+
+
+async def general_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Catch-all handler: converts any uncaught exception to a JSON error.
+
+    This ensures SDK exceptions (e.g. SandboxNotFoundError) and other
+    unexpected errors return structured JSON instead of a raw 500 traceback.
+    """
+    # Check if it's an SDK error with a known type name.
+    exc_module = type(exc).__module__
+    exc_name = type(exc).__name__
+
+    # Map common SDK errors to appropriate HTTP status codes.
+    status_code = 500
+    code = "internal_error"
+
+    if "NotFound" in exc_name:
+        status_code = 404
+        code = "not_found"
+    elif "Timeout" in exc_name:
+        status_code = 504
+        code = "timeout"
+    elif "Conflict" in exc_name or "Concurrent" in exc_name:
+        status_code = 409
+        code = "conflict"
+    elif "Unreachable" in exc_name or "Connection" in exc_name:
+        status_code = 503
+        code = "connection_error"
+    elif "Auth" in exc_name or "Permission" in exc_name or "Forbidden" in exc_name:
+        status_code = 403
+        code = "forbidden"
+
+    logger.warning("Unhandled exception %s.%s: %s", exc_module, exc_name, exc)
+
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "error": {
+                "code": code,
+                "message": str(exc),
+                "details": {"exception_type": exc_name, "module": exc_module},
+            }
+        },
+    )
 
 
 @contextlib.asynccontextmanager
@@ -46,11 +97,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await conn.run_sync(Base.metadata.create_all)
 
     # Persist deployment_id to system_meta if not already present.
-    from sqlalchemy import select
-
-    from app.db.engine import get_session_factory
-    from app.models.system_meta import SystemMeta
-
     factory = get_session_factory()
     async with factory() as session:
         existing = await session.execute(
@@ -72,9 +118,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     yield
 
-    # Graceful shutdown: close all cached adapters + dispose engine.
-    from app.services.connection_service import _adapter_cache
-
+    # Graceful shutdown: close all cached adapters + history stores + dispose engine.
+    await close_all_stores()
     for adapter in _adapter_cache.values():
         if hasattr(adapter, "close"):
             try:
@@ -108,6 +153,7 @@ def create_app() -> FastAPI:
 
     # Exception handlers
     app.add_exception_handler(ExplorerError, explorer_exception_handler)
+    app.add_exception_handler(Exception, general_exception_handler)
 
     # API routes
     app.include_router(v1_router)
@@ -132,20 +178,32 @@ def create_app() -> FastAPI:
         return await metrics_endpoint()
 
     # Serve frontend static files if the directory exists.
-    import os
-
     static_dir = os.environ.get("EXPLORER_STATIC_DIR", "")
     if static_dir and os.path.isdir(static_dir):
         from fastapi.staticfiles import StaticFiles
+        from starlette.exceptions import HTTPException as StarletteHTTPException
+        from starlette.responses import FileResponse
 
-        app.mount("/", StaticFiles(directory=static_dir, html=True), name="frontend")
+        class SPAStaticFiles(StaticFiles):
+            """StaticFiles with SPA fallback: return index.html for unknown routes."""
+
+            async def get_response(self, path: str, scope):
+                try:
+                    return await super().get_response(path, scope)
+                except StarletteHTTPException as ex:
+                    if ex.status_code == 404 and not path.startswith("api/"):
+                        return FileResponse(
+                            os.path.join(static_dir, "index.html"),
+                            media_type="text/html",
+                        )
+                    raise
+
+        app.mount("/", SPAStaticFiles(directory=static_dir, html=True), name="frontend")
 
     return app
 
 
 def _now_iso() -> str:
-    from datetime import datetime
-
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 

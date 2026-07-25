@@ -18,7 +18,7 @@ class CreateSandboxRequest(BaseModel):
     """Request body for POST /connections/{id}/sandboxes."""
 
     image: str = Field(default="python:3.12")
-    workdir: str = Field(default="/workspace")
+    workdir: str = Field(default="/")
     name: str = Field(default="", description="User-friendly sandbox name")
     ttl_seconds: int | None = Field(
         default=None,
@@ -34,7 +34,7 @@ class CreateSandboxDirectRequest(BaseModel):
     api_key: str = Field(default="", description="API key for authentication")
     provider_type: str = Field(default="opensandbox")
     image: str = Field(default="python:3.12")
-    workdir: str = Field(default="/workspace")
+    workdir: str = Field(default="/")
     name: str = Field(default="", description="User-friendly sandbox name")
     ttl_seconds: int | None = Field(default=None)
     save_connection: bool = Field(

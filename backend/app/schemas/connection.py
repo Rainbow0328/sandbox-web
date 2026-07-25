@@ -4,7 +4,17 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+
+def _normalize_endpoint(v: str) -> str:
+    """Ensure endpoint has an http:// or https:// prefix."""
+    if not v:
+        return v
+    v = v.strip()
+    if not v.startswith("http://") and not v.startswith("https://"):
+        v = f"http://{v}"
+    return v
 
 
 class ConnectionCreate(BaseModel):
@@ -19,6 +29,11 @@ class ConnectionCreate(BaseModel):
     )
     default_workdir: str | None = Field(default=None, max_length=512)
 
+    @field_validator("endpoint")
+    @classmethod
+    def _ensure_scheme(cls, v: str) -> str:
+        return _normalize_endpoint(v)
+
 
 class ConnectionUpdate(BaseModel):
     """Request body for PATCH /api/v1/connections/{id}. All fields optional."""
@@ -29,6 +44,13 @@ class ConnectionUpdate(BaseModel):
     credentials: dict[str, Any] | None = None
     default_workdir: str | None = Field(default=None, max_length=512)
     enabled: bool | None = None
+
+    @field_validator("endpoint")
+    @classmethod
+    def _ensure_scheme(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        return _normalize_endpoint(v)
 
 
 class ConnectionResponse(BaseModel):

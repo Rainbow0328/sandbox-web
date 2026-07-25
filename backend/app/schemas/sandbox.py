@@ -13,8 +13,10 @@ class SandboxInfo(BaseModel):
     name: str = ""
     state: str  # running|paused|stopped|...
     image: str | None = None
-    workdir: str = "/workspace"
+    workdir: str = "/"
     expires_at: str | None = None  # RFC3339
+    created_at: str | None = None  # RFC3339
+    last_activity_at: str | None = None  # RFC3339, from history projection
     metadata: dict[str, str] = Field(default_factory=dict)
 
 

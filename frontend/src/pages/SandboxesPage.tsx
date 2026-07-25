@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Boxes, RefreshCw, Search, ExternalLink, Plus, X, AlertCircle, Link2, Globe } from 'lucide-react';
+import { Boxes, RefreshCw, Search, ExternalLink, Plus, X, AlertCircle, Link2, Globe, Clock } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
 import { api, type SandboxListResponse, type ConnectionResponse } from '@/lib/api';
 import { cn } from '@/lib/utils';
@@ -12,6 +12,35 @@ const stateColors: Record<string, string> = {
   failed: 'border-red-300 bg-red-100 text-red-700',
   creating: 'border-blue-300 bg-blue-100 text-blue-700',
 };
+
+function formatDateTime(iso: string | null): string {
+  if (!iso) return '—';
+  try {
+    const d = new Date(iso);
+    return d.toLocaleString('zh-CN', {
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  } catch {
+    return iso;
+  }
+}
+
+function timeAgo(iso: string | null): string {
+  if (!iso) return '—';
+  try {
+    const d = new Date(iso);
+    const diff = Date.now() - d.getTime();
+    if (diff < 60_000) return 'just now';
+    if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
+    if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
+    return `${Math.floor(diff / 86_400_000)}d ago`;
+  } catch {
+    return iso;
+  }
+}
 
 export function SandboxesPage() {
   const [search, setSearch] = useState('');
@@ -154,6 +183,8 @@ export function SandboxesPage() {
                 <th className="px-4 py-2 text-left font-medium">Sandbox ID</th>
                 <th className="px-4 py-2 text-left font-medium">State</th>
                 <th className="px-4 py-2 text-left font-medium">Image</th>
+                <th className="px-4 py-2 text-left font-medium">Created</th>
+                <th className="px-4 py-2 text-left font-medium">Last Activity</th>
                 <th className="px-4 py-2 text-left font-medium">Actions</th>
               </tr>
             </thead>
@@ -170,6 +201,19 @@ export function SandboxesPage() {
                     </span>
                   </td>
                   <td className="px-4 py-2 text-muted-foreground">{s.image ?? '—'}</td>
+                  <td className="px-4 py-2 text-xs text-muted-foreground whitespace-nowrap">
+                    {formatDateTime(s.created_at)}
+                  </td>
+                  <td className="px-4 py-2 text-xs text-muted-foreground whitespace-nowrap">
+                    {s.last_activity_at ? (
+                      <span className="flex items-center gap-1">
+                        <Clock className="h-3 w-3" />
+                        {timeAgo(s.last_activity_at)}
+                      </span>
+                    ) : (
+                      '—'
+                    )}
+                  </td>
                   <td className="px-4 py-2">
                     <Link
                       to={`/sandboxes/${s.connection_id}/${s.sandbox_id}?tab=overview`}
@@ -224,7 +268,7 @@ function CreateSandboxForm({
   const [connectionId, setConnectionId] = useState(connections[0]?.id ?? '');
   const [name, setName] = useState('');
   const [image, setImage] = useState('python:3.12');
-  const [workdir, setWorkdir] = useState('/workspace');
+  const [workdir, setWorkdir] = useState('/');
   const [ttlSeconds, setTtlSeconds] = useState('');
   // Direct mode fields
   const [endpoint, setEndpoint] = useState('');
@@ -377,7 +421,7 @@ function CreateSandboxForm({
               className="input"
               value={workdir}
               onChange={(e) => setWorkdir(e.target.value)}
-              placeholder="/workspace"
+              placeholder="/"
               required
             />
           </div>
