@@ -33,7 +33,7 @@ dependencies = [
   "httpx>=0.27,<1",
   "apscheduler>=3.10,<4",
   "cryptography>=43,<46",
-  "structlog>=24.4,<26",
+  "structlog>=24.4,<27",
   "python-multipart>=0.0.9,<1",
   "agent-sandbox-backends[opensandbox]>=0.1.0,<0.2",
 ]
