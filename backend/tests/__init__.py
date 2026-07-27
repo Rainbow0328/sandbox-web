@@ -1,1 +1,1 @@
-"""Sandbox Explorer backend test suite."""
+"""Sandbox Console backend test suite."""

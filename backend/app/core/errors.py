@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 
 
 class ExplorerError(Exception):
-    """Base error for all Sandbox Explorer domain errors."""
+    """Base error for all Sandbox Console domain errors."""
 
     code = "explorer_error"
     status_code = 500

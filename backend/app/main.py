@@ -7,6 +7,7 @@ import logging
 import os
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -135,9 +136,9 @@ def create_app() -> FastAPI:
     settings = get_settings()
 
     app = FastAPI(
-        title="Sandbox Explorer",
+        title="Sandbox Console",
         description="Web Console for observing and operating sandbox environments.",
-        version="0.1.0",
+        version="0.2.0",
         lifespan=lifespan,
     )
 
@@ -177,30 +178,43 @@ def create_app() -> FastAPI:
     async def metrics():
         return await metrics_endpoint()
 
-    # Serve frontend static files if the directory exists.
+    # Serve frontend static files.
+    # Detection order: EXPLORER_STATIC_DIR env → bundled app/static → frontend/dist (dev).
     static_dir = os.environ.get("EXPLORER_STATIC_DIR", "")
     if static_dir and os.path.isdir(static_dir):
-        from fastapi.staticfiles import StaticFiles
-        from starlette.exceptions import HTTPException as StarletteHTTPException
-        from starlette.responses import FileResponse
-
-        class SPAStaticFiles(StaticFiles):
-            """StaticFiles with SPA fallback: return index.html for unknown routes."""
-
-            async def get_response(self, path: str, scope):
-                try:
-                    return await super().get_response(path, scope)
-                except StarletteHTTPException as ex:
-                    if ex.status_code == 404 and not path.startswith("api/"):
-                        return FileResponse(
-                            os.path.join(static_dir, "index.html"),
-                            media_type="text/html",
-                        )
-                    raise
-
-        app.mount("/", SPAStaticFiles(directory=static_dir, html=True), name="frontend")
+        _mount_static(app, static_dir)
+    else:
+        # Check for bundled static files inside the installed package.
+        bundled = Path(__file__).resolve().parent / "static"
+        if bundled.is_dir():
+            real_files = [f for f in bundled.rglob("*") if f.name != ".gitkeep"]
+            if real_files:
+                _mount_static(app, str(bundled))
 
     return app
+
+
+def _mount_static(app: FastAPI, static_dir: str) -> None:
+    """Mount the SPA static files directory onto the FastAPI app."""
+    from fastapi.staticfiles import StaticFiles
+    from starlette.exceptions import HTTPException as StarletteHTTPException
+    from starlette.responses import FileResponse
+
+    class SPAStaticFiles(StaticFiles):
+        """StaticFiles with SPA fallback: return index.html for unknown routes."""
+
+        async def get_response(self, path: str, scope):
+            try:
+                return await super().get_response(path, scope)
+            except StarletteHTTPException as ex:
+                if ex.status_code == 404 and not path.startswith("api/"):
+                    return FileResponse(
+                        os.path.join(static_dir, "index.html"),
+                        media_type="text/html",
+                    )
+                raise
+
+    app.mount("/", SPAStaticFiles(directory=static_dir, html=True), name="frontend")
 
 
 def _now_iso() -> str:

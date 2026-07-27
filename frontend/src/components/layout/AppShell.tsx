@@ -48,7 +48,7 @@ export function AppShell() {
       <header className="flex h-12 items-center justify-between border-b px-4">
         <div className="flex items-center gap-2">
           <Terminal className="h-5 w-5" />
-          <span className="font-semibold">Sandbox Explorer</span>
+          <span className="font-semibold">Sandbox Console</span>
         </div>
         <div className="flex items-center gap-4">
           <span className="text-sm text-muted-foreground">{actor?.actor_id ?? 'admin'}</span>

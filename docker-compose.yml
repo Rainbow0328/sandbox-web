@@ -1,4 +1,4 @@
-# Sandbox Explorer — Docker Compose
+# Sandbox Console — Docker Compose
 #
 # Port configuration:
 #   Set EXPLORER_PORT in .env or shell environment to change the container's
@@ -11,9 +11,9 @@
 #     - "8088:9090"
 
 services:
-  sandbox-explorer:
+  sandbox-console:
     # Use pre-built image from Docker Hub (uncomment for production):
-    # image: sandboxexplorer/sandbox-explorer:latest
+    # image: sandboxconsole/sandbox-console:latest
     # Or build from source:
     build:
       context: ..
@@ -21,7 +21,7 @@ services:
     ports:
       - "${EXPLORER_PORT:-9090}:${EXPLORER_PORT:-9090}"
     volumes:
-      - sandbox-explorer-data:/data
+      - sandbox-console-data:/data
     environment:
       - EXPLORER_MASTER_KEY=${EXPLORER_MASTER_KEY:-}
       - EXPLORER_ADMIN_TOKEN=${EXPLORER_ADMIN_TOKEN:-}
@@ -37,4 +37,4 @@ services:
       retries: 3
 
 volumes:
-  sandbox-explorer-data:
+  sandbox-console-data:

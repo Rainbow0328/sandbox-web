@@ -1,4 +1,4 @@
-"""Business services for Sandbox Explorer."""
+"""Business services for Sandbox Console."""
 
 from app.services import (
     command_service,

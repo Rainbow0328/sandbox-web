@@ -1,4 +1,4 @@
-"""Integration tests for Sandbox Explorer API — covers §19.3 acceptance checklist."""
+"""Integration tests for Sandbox Console API — covers §19.3 acceptance checklist."""
 
 from __future__ import annotations
 

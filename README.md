@@ -1,8 +1,8 @@
-# Sandbox Explorer
+# Sandbox Console
 
 A web console for observing and operating sandbox environments. Manage sandboxes, browse files, execute commands, and view operation history — all from a browser.
 
-Built with FastAPI (backend) + React/TypeScript (frontend), packaged as a single Docker container or runnable locally with one command.
+Built with FastAPI (backend) + React/TypeScript (frontend), packaged as a single Docker container, pip-installable, or runnable locally with one command.
 
 ## Features
 
@@ -16,21 +16,42 @@ Built with FastAPI (backend) + React/TypeScript (frontend), packaged as a single
 
 ## Quick Start
 
-### Prerequisites
+### Option A: pip install (Recommended)
 
-- Python 3.11+
-- Node.js 18+
+Install the package — the frontend is pre-built and bundled inside the wheel, so **no Node.js required**.
 
-### Launch (One Command)
+```bash
+pip install sandbox-console
+```
+
+Start the server:
+
+```bash
+sandbox-console-server                      # Start on http://localhost:9090
+sandbox-console-server --port 3000          # Custom port
+sandbox-console-server --host 127.0.0.1     # Bind to localhost only
+```
+
+Open `http://localhost:9090` in your browser. No environment variables required for local use — auth is disabled by default.
+
+> **Note:** The Console defaults to port **9090** to avoid conflicting with the OpenSandbox service which runs on port **8080**.
+
+### Option B: Run from Source
+
+Requires Python 3.11+ and Node.js 18+.
 
 ```bash
 python start.py          # Production: build frontend + serve on http://localhost:9090
 python start.py --dev    # Development: hot-reload frontend (:5173) + backend (:9090)
 ```
 
-That's it. No environment variables required for local development — auth is disabled by default. Open `http://localhost:9090` (production) or `http://localhost:5173` (dev) in your browser.
+Or install in editable mode and use the CLI:
 
-> **Note:** The Console defaults to port **9090** to avoid conflicting with the OpenSandbox service which runs on port **8080**.
+```bash
+cd backend
+pip install -e .
+sandbox-console-server --dev    # Dev mode with hot-reload
+```
 
 ### Docker
 
@@ -38,10 +59,10 @@ That's it. No environment variables required for local development — auth is d
 
 ```bash
 # Build (from parent directory containing both repos)
-docker build -f sandbox-console/docker/Dockerfile -t sandbox-explorer .
+docker build -f sandbox-console/docker/Dockerfile -t sandbox-console .
 
 # Run
-docker run -d -p 9090:9090 -v sandbox-explorer-data:/data sandbox-explorer
+docker run -d -p 9090:9090 -v sandbox-console-data:/data sandbox-console
 ```
 
 Or with Docker Compose:
@@ -62,12 +83,17 @@ Ports can be configured via **CLI flags**, **environment variables**, or **`.env
 | Frontend port | `--frontend-port` | `EXPLORER_FRONTEND_PORT` | `5173` | Dev only |
 
 ```bash
-# Examples
-python start.py --port 3000                         # Custom backend port
-python start.py --dev --port 3000 --frontend-port 3001  # Custom dev ports
-EXPLORER_PORT=3000 python start.py                  # Via environment variable
+# Examples (pip install)
+sandbox-console-server --port 3000                              # Custom port
+sandbox-console-server --dev --port 3000 --frontend-port 3001   # Custom dev ports
+EXPLORER_PORT=3000 sandbox-console-server                       # Via environment variable
 
-# .env file (project root, loaded automatically)
+# Examples (from source)
+python start.py --port 3000                                  # Custom backend port
+python start.py --dev --port 3000 --frontend-port 3001       # Custom dev ports
+EXPLORER_PORT=3000 python start.py                           # Via environment variable
+
+# .env file (project root or CWD, loaded automatically)
 # EXPLORER_PORT=3000
 # EXPLORER_HOST=0.0.0.0
 ```
@@ -75,7 +101,7 @@ EXPLORER_PORT=3000 python start.py                  # Via environment variable
 For Docker, set `EXPLORER_PORT` and map the same port:
 
 ```bash
-docker run -p 3000:3000 -e EXPLORER_PORT=3000 sandbox-explorer
+docker run -p 3000:3000 -e EXPLORER_PORT=3000 sandbox-console
 ```
 
 ## Configuration
@@ -116,17 +142,20 @@ All configuration via environment variables (prefix `EXPLORER_`). See [`.env.exa
 sandbox-console/
 ├── start.py                # Unified startup script
 ├── backend/                # FastAPI backend
+│   ├── hatch_build.py     # Build hook: compiles frontend into wheel
 │   ├── app/
-│   │   ├── main.py         # App factory
-│   │   ├── core/           # Config, security, errors
-│   │   ├── db/             # Engine, session, base
-│   │   ├── models/         # ORM models
-│   │   ├── schemas/        # Pydantic IO models
-│   │   ├── adapters/       # Sandbox adapters (Fake, OpenSandbox)
-│   │   ├── services/       # Business logic
-│   │   ├── api/v1/         # REST routes
-│   │   ├── realtime/       # WebSocket terminal
-│   │   └── observability/  # Metrics, health
+│   │   ├── cli.py         # CLI entry point (sandbox-console-server)
+│   │   ├── main.py        # App factory
+│   │   ├── static/        # Bundled frontend (built by hatch_build.py)
+│   │   ├── core/          # Config, security, errors
+│   │   ├── db/            # Engine, session, base
+│   │   ├── models/        # ORM models
+│   │   ├── schemas/       # Pydantic IO models
+│   │   ├── adapters/      # Sandbox adapters (Fake, OpenSandbox)
+│   │   ├── services/      # Business logic
+│   │   ├── api/v1/        # REST routes
+│   │   ├── realtime/      # WebSocket terminal
+│   │   └── observability/ # Metrics, health
 │   └── tests/             # Integration tests
 ├── frontend/              # React + TypeScript frontend
 │   └── src/

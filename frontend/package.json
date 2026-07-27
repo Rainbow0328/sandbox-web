@@ -1,10 +1,10 @@
 {
-  "name": "sandbox-explorer",
+  "name": "sandbox-console",
   "private": true,
   "version": "0.1.0",
   "description": "A web console for observing and operating sandbox environments",
   "license": "Apache-2.0",
-  "author": "Sandbox Explorer Contributors",
+  "author": "Sandbox Console Contributors",
   "homepage": "https://github.com/Rainbow0328/sandbox-web",
   "repository": {
     "type": "git",

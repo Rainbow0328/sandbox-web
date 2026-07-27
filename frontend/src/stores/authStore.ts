@@ -45,7 +45,7 @@ export const useAuthStore = create<AuthState>()(
       },
     }),
     {
-      name: 'sandbox-explorer-auth',
+      name: 'sandbox-console-auth',
       partialize: (state) => ({
         sessionToken: state.sessionToken,
         actor: state.actor,

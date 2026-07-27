@@ -1,4 +1,4 @@
-# Contributing to Sandbox Explorer
+# Contributing to Sandbox Console
 
 ## Development Setup
 

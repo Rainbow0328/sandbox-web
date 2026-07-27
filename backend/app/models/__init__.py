@@ -1,4 +1,4 @@
-"""ORM models for Sandbox Explorer."""
+"""ORM models for Sandbox Console."""
 
 from app.models.connection import Connection
 from app.models.console_activity import ConsoleActivity

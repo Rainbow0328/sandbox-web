@@ -9,7 +9,7 @@ RUN npm run build
 # ---- Stage 2: Python runtime ----
 FROM python:3.12-slim AS runtime
 
-LABEL org.opencontainers.image.title="Sandbox Explorer"
+LABEL org.opencontainers.image.title="Sandbox Console"
 LABEL org.opencontainers.image.description="Web Console for sandbox environments"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 LABEL org.opencontainers.image.source="https://github.com/Rainbow0328/sandbox-web"

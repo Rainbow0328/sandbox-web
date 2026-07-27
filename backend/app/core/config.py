@@ -13,7 +13,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """Central configuration for the Sandbox Explorer.
+    """Central configuration for the Sandbox Console.
 
     Values are resolved with priority: environment variable > explorer.yaml > default.
     """

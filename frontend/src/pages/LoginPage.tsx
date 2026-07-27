@@ -33,7 +33,7 @@ export function LoginPage() {
       <div className="w-full max-w-md rounded-lg border bg-background p-8 shadow-lg">
         <div className="mb-6 flex items-center gap-2">
           <Terminal className="h-6 w-6" />
-          <h1 className="text-xl font-semibold">Sandbox Explorer</h1>
+          <h1 className="text-xl font-semibold">Sandbox Console</h1>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">

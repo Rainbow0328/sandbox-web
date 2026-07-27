@@ -3,14 +3,14 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
-name = "sandbox-explorer"
-version = "0.1.0"
-description = "Sandbox Explorer Web Console"
-readme = "../README.md"
+name = "sandbox-console"
+version = "0.2.0"
+description = "Sandbox Console — Web UI for OpenSandbox management"
+readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.11,<3.15"
 authors = [
-  { name = "Sandbox Explorer Contributors" },
+  { name = "Sandbox Console Contributors" },
 ]
 keywords = ["sandbox", "opensandbox", "web-console", "fastapi"]
 classifiers = [
@@ -35,8 +35,11 @@ dependencies = [
   "cryptography>=43,<46",
   "structlog>=24.4,<26",
   "python-multipart>=0.0.9,<1",
-  "agent-sandbox-backends>=0.1.0,<0.2",
+  "agent-sandbox-backends[opensandbox]>=0.1.0,<0.2",
 ]
+
+[project.scripts]
+sandbox-console-server = "app.cli:main"
 
 [project.optional-dependencies]
 dev = [
@@ -51,6 +54,37 @@ postgresql = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["app"]
+
+[tool.hatch.build.targets.sdist]
+# Only include the app package, build hook, README, and config in sdist.
+# This prevents database files, virtual environments, and other runtime
+# artifacts from leaking into the source distribution.
+include = [
+  "app",
+  "hatch_build.py",
+  "README.md",
+  "pyproject.toml",
+]
+
+[tool.hatch.build]
+# Global exclude patterns (apply to both wheel and sdist).
+exclude = [
+  "data",
+  "tests",
+  ".venv",
+  "test-venv",
+  "test-pypi-venv",
+  "*.egg-info",
+  "__pycache__",
+  "*.pyc",
+  ".pytest_cache",
+  ".ruff_cache",
+  "*.db",
+  "*.db-*",
+]
+
+[tool.hatch.build.hooks.custom]
+path = "hatch_build.py"
 
 # Local SDK source override (development only).
 # This section is automatically ignored when the path does not exist

@@ -1,4 +1,4 @@
-"""Pydantic schemas for Sandbox Explorer API."""
+"""Pydantic schemas for Sandbox Console API."""
 
 from app.schemas.auth import ActorInfo, LoginRequest, LoginResponse
 from app.schemas.command import (

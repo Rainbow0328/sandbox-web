@@ -1,1 +1,1 @@
-"""Sandbox Explorer Web Console backend application."""
+"""Sandbox Console Web Console backend application."""
