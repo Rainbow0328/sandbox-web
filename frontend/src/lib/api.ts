@@ -242,3 +242,73 @@ export interface TerminalCreateResponse {
   terminal_id: string;
   ws_url: string;
 }
+
+// --- Backup types ---
+export interface BackupItem {
+  backup_id: string;
+  file_path: string;
+  content_hash: string;
+  content_size: number;
+  encoding: string;
+  original_size: number;
+  description: string;
+  trigger_type: string;
+  rule_name: string | null;
+  actor_type: string;
+  actor_id: string | null;
+  command: string | null;
+  created_at: string;
+}
+
+export interface BackupDetail extends BackupItem {
+  content_base64: string | null;
+}
+
+export interface BackupListResponse {
+  backups: BackupItem[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface BackupFileListResponse {
+  files: { file_path: string; backup_count: number; latest_backup_at: string }[];
+  total: number;
+}
+
+export interface BackupCreateResponse {
+  backup_id: string | null;
+  file_path: string;
+  created: boolean;
+  message: string | null;
+}
+
+export interface BackupRestoreResponse {
+  backup_id: string;
+  file_path: string;
+  content_hash: string;
+  content_size: number;
+  restored: boolean;
+  pre_restore_backup_id: string | null;
+  message: string | null;
+}
+
+export interface BackupDeleteResponse {
+  backup_id: string;
+  deleted: boolean;
+}
+
+export interface BackupDeleteByPathResponse {
+  file_path: string;
+  deleted: number;
+}
+
+export interface BackupDiffResponse {
+  backup_id: string;
+  file_path: string;
+  diff: string | null;
+  has_diff: boolean;
+  comparison_source: string;
+  is_binary: boolean;
+  is_latest: boolean;
+}

@@ -1,20 +1,22 @@
 import { useState } from 'react';
 import { useParams, useSearchParams, useNavigate, Link } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { ArrowLeft, Pause, Play, Trash2, Folder, Terminal, Info, History } from 'lucide-react';
+import { ArrowLeft, Pause, Play, Trash2, Folder, Terminal, Info, History, FileArchive } from 'lucide-react';
 import { api, type SandboxInfo, type Capabilities } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { FilesTab } from '@/features/sandbox-files/FilesTab';
 import { CommandsTab } from '@/features/sandbox-commands/CommandsTab';
 import { HistoryTab } from '@/features/sandbox-history/HistoryTab';
+import { BackupsTab } from '@/features/sandbox-backups/BackupsTab';
 
-type TabId = 'overview' | 'files' | 'commands' | 'history';
+type TabId = 'overview' | 'files' | 'commands' | 'history' | 'backups';
 
 const tabs: { id: TabId; label: string; icon: typeof Info }[] = [
-  { id: 'overview', label: 'Overview', icon: Info },
-  { id: 'files', label: 'Files', icon: Folder },
-  { id: 'commands', label: 'Commands', icon: Terminal },
-  { id: 'history', label: 'History', icon: History },
+  { id: 'overview', label: '概览', icon: Info },
+  { id: 'files', label: '文件', icon: Folder },
+  { id: 'commands', label: '命令', icon: Terminal },
+  { id: 'history', label: '历史', icon: History },
+  { id: 'backups', label: '备份', icon: FileArchive },
 ];
 
 export function SandboxDetailPage() {
@@ -140,32 +142,32 @@ export function SandboxDetailPage() {
       <div className="flex-1 overflow-auto">
         {tab === 'overview' && (
           <div className="grid gap-4 p-4 md:grid-cols-2">
-            <Card title="Identity">
+            <Card title="基本信息">
               {sandbox ? (
                 <dl className="space-y-1 text-sm">
-                  <Row label="Sandbox ID" value={sandbox.sandbox_id} />
-                  <Row label="Connection" value={sandbox.connection_id ?? '—'} />
-                  <Row label="State" value={sandbox.state} />
-                  <Row label="Image" value={sandbox.image ?? '—'} />
-                  <Row label="Workdir" value={sandbox.workdir} />
+                  <Row label="沙箱 ID" value={sandbox.sandbox_id} />
+                  <Row label="连接" value={sandbox.connection_id ?? '—'} />
+                  <Row label="状态" value={sandbox.state} />
+                  <Row label="镜像" value={sandbox.image ?? '—'} />
+                  <Row label="工作目录" value={sandbox.workdir} />
                 </dl>
               ) : (
-                <div className="text-muted-foreground">Loading…</div>
+                <div className="text-muted-foreground">加载中…</div>
               )}
             </Card>
-            <Card title="Capabilities">
+            <Card title="能力">
               {capabilities ? (
                 <dl className="space-y-1 text-sm">
                   {Object.entries(capabilities).map(([key, cap]) => (
                     <Row
                       key={key}
                       label={key}
-                      value={cap.supported ? '✓ native' : '✗ unavailable'}
+                      value={cap.supported ? '✓ 原生支持' : '✗ 不可用'}
                     />
                   ))}
                 </dl>
               ) : (
-                <div className="text-muted-foreground">Loading…</div>
+                <div className="text-muted-foreground">加载中…</div>
               )}
             </Card>
           </div>
@@ -178,6 +180,9 @@ export function SandboxDetailPage() {
         )}
         {tab === 'history' && connectionId && sandboxId && (
           <HistoryTab connectionId={connectionId} sandboxId={sandboxId} />
+        )}
+        {tab === 'backups' && connectionId && sandboxId && (
+          <BackupsTab connectionId={connectionId} sandboxId={sandboxId} />
         )}
       </div>
     </div>
