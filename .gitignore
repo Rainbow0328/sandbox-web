@@ -46,7 +46,15 @@ Thumbs.db
 *.swp
 *.swo
 
-# Personal / internal testing docs — keep locally, never push to GitHub
+# Personal / internal docs — keep locally, never push to GitHub
 docs/BACKUP_TESTING.md
 docs/LOCAL_TESTING.md
 docs/OpenSandbox-*.md
+SECURITY.md
+CONTRIBUTING.md
+CHANGELOG.md
+
+# GitHub templates & automation — not needed for personal project
+.github/ISSUE_TEMPLATE/
+.github/PULL_REQUEST_TEMPLATE.md
+.github/dependabot.yml

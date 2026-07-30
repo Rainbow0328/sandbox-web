@@ -308,7 +308,6 @@ app = graph.compile()
 langgraph dev  # 启动 LangGraph 开发服务器
 ```
 
-> 完整的 Agent 项目示例和 `langgraph dev` 配置详见 [备份功能测试文档](docs/BACKUP_TESTING.md)。
 
 ## 项目结构
 
@@ -349,12 +348,6 @@ cd backend
 pip install -e ".[dev]"
 pytest tests/ -v
 ```
-
-## 相关文档
-
-- [沙箱管理套件介绍](docs/OpenSandbox-沙箱管理套件介绍.md)
-- [文件备份与回滚功能测试文档](docs/BACKUP_TESTING.md)
-- [TestPyPI 发布指南](docs/LOCAL_TESTING.md)
 
 ## 许可证
 
