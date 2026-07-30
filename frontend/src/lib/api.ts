@@ -311,4 +311,12 @@ export interface BackupDiffResponse {
   comparison_source: string;
   is_binary: boolean;
   is_latest: boolean;
+  old_text: string | null;
+  new_text: string | null;
+}
+
+export interface BackupBatchDeleteResponse {
+  deleted: number;
+  failed: number;
+  details: { backup_id: string; deleted: boolean; error?: string }[];
 }

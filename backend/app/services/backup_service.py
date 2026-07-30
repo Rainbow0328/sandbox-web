@@ -9,12 +9,14 @@ on every request.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.history.store_pool import get_history_store
 from app.schemas.backup import (
+    BackupBatchDeleteResponse,
     BackupCreateRequest,
     BackupCreateResponse,
     BackupDeleteByPathResponse,
@@ -29,6 +31,12 @@ from app.schemas.backup import (
 from app.services.file_service import get_sandbox_ref
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# In-memory diff cache:  { backup_id -> (timestamp, BackupDiffResponse) }
+# ---------------------------------------------------------------------------
+_diff_cache: dict[str, tuple[float, BackupDiffResponse]] = {}
+_DIFF_CACHE_TTL = 300  # 5 minutes
 
 
 async def list_backups(
@@ -335,6 +343,8 @@ async def get_backup_diff(
     connection_id: str,
     sandbox_id: str,
     backup_id: str,
+    *,
+    side_by_side: bool = False,
 ) -> BackupDiffResponse | None:
     """Compute a git-style unified diff between a backup and the next version.
 
@@ -342,11 +352,20 @@ async def get_backup_diff(
       - The content of the next backup (by created_at) for the same file, if one exists.
       - The current file content, if this is the latest backup.
 
-    This shows what changes were made to the file *after* this backup was taken.
+    Results are cached in-memory for ``_DIFF_CACHE_TTL`` seconds to avoid
+    recomputing on every request.
+
+    If ``side_by_side`` is True, the response also includes ``old_text`` and
+    ``new_text`` so the frontend can render a two-column diff view.
     """
     import base64
     import difflib
     import hashlib
+
+    cache_key = f"{backup_id}:{side_by_side}"
+    cached = _diff_cache.get(cache_key)
+    if cached and (time.time() - cached[0]) < _DIFF_CACHE_TTL:
+        return cached[1]
 
     try:
         ref, adapter, _ = await get_sandbox_ref(session, connection_id, sandbox_id)
@@ -455,7 +474,7 @@ async def get_backup_diff(
         else:
             diff_text = None
 
-        return BackupDiffResponse(
+        response = BackupDiffResponse(
             backup_id=backup_id,
             file_path=file_path,
             diff=diff_text,
@@ -463,7 +482,11 @@ async def get_backup_diff(
             comparison_source=comparison_source,
             is_binary=False,
             is_latest=is_latest,
+            old_text=old_text if side_by_side else None,
+            new_text=new_text if side_by_side else None,
         )
+        _diff_cache[cache_key] = (time.time(), response)
+        return response
     except Exception as exc:
         logger.warning("Failed to get backup diff %s: %s", backup_id, exc, exc_info=True)
         return None
@@ -518,4 +541,74 @@ async def delete_backups_by_path(
         )
     except Exception as exc:
         logger.warning("Failed to delete backups for %s: %s", file_path, exc, exc_info=True)
+        return None
+
+
+async def batch_delete_backups(
+    session: AsyncSession,
+    connection_id: str,
+    sandbox_id: str,
+    backup_ids: list[str],
+) -> BackupBatchDeleteResponse:
+    """Delete multiple backups by ID in a single call."""
+    deleted = 0
+    failed = 0
+    details: list[dict[str, Any]] = []
+    try:
+        ref, adapter, _ = await get_sandbox_ref(session, connection_id, sandbox_id)
+        store = await get_history_store(
+            adapter, ref,
+            connection_id=ref.provider_key,
+            sandbox_id=ref.sandbox_id,
+        )
+        if store is None:
+            return BackupBatchDeleteResponse(deleted=0, failed=len(backup_ids))
+        for bid in backup_ids:
+            try:
+                result = await store.backup_delete(bid)
+                ok = bool(result.get("deleted"))
+                if ok:
+                    deleted += 1
+                else:
+                    failed += 1
+                details.append({"backup_id": bid, "deleted": ok})
+            except Exception as exc:
+                failed += 1
+                details.append({"backup_id": bid, "deleted": False, "error": str(exc)})
+        return BackupBatchDeleteResponse(deleted=deleted, failed=failed, details=details)
+    except Exception as exc:
+        logger.warning("Failed to batch delete backups: %s", exc, exc_info=True)
+        return BackupBatchDeleteResponse(deleted=deleted, failed=len(backup_ids) - deleted)
+
+
+async def get_backup_content(
+    session: AsyncSession,
+    connection_id: str,
+    sandbox_id: str,
+    backup_id: str,
+) -> tuple[bytes, str, str] | None:
+    """Return (content_bytes, file_path, content_hash) for a backup.
+
+    Used for backup export (download).
+    """
+    import base64
+
+    try:
+        ref, adapter, _ = await get_sandbox_ref(session, connection_id, sandbox_id)
+        store = await get_history_store(
+            adapter, ref,
+            connection_id=ref.provider_key,
+            sandbox_id=ref.sandbox_id,
+        )
+        if store is None:
+            return None
+        result = await store.backup_get(backup_id, include_content=True)
+        if not result:
+            return None
+        content = base64.b64decode(result["content_base64"], validate=True)
+        file_path = result.get("file_path", "backup")
+        content_hash = result.get("content_hash", "")
+        return (content, file_path, content_hash)
+    except Exception as exc:
+        logger.warning("Failed to get backup content %s: %s", backup_id, exc, exc_info=True)
         return None

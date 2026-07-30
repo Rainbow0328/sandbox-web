@@ -108,8 +108,26 @@ class BackupDeleteByPathResponse(BaseModel):
     deleted: int
 
 
+class BackupBatchDeleteRequest(BaseModel):
+    """Request to delete multiple backups by ID."""
+
+    backup_ids: list[str]
+
+
+class BackupBatchDeleteResponse(BaseModel):
+    """Response after batch-deleting backups."""
+
+    deleted: int
+    failed: int
+    details: list[dict[str, Any]] = []
+
+
 class BackupDiffResponse(BaseModel):
-    """Git-style unified diff between a backup and the next version."""
+    """Git-style unified diff between a backup and the next version.
+
+    When ``side_by_side`` is requested, ``old_text`` and ``new_text`` are
+    populated so the frontend can render a two-column diff view.
+    """
 
     backup_id: str
     file_path: str
@@ -118,3 +136,5 @@ class BackupDiffResponse(BaseModel):
     comparison_source: str = ""
     is_binary: bool = False
     is_latest: bool = False
+    old_text: str | None = None
+    new_text: str | None = None

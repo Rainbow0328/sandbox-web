@@ -45,3 +45,8 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+
+# Personal / internal testing docs — keep locally, never push to GitHub
+docs/BACKUP_TESTING.md
+docs/LOCAL_TESTING.md
+docs/OpenSandbox-*.md
