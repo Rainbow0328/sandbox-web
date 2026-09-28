@@ -5,15 +5,25 @@ from app.models.console_activity import ConsoleActivity
 from app.models.consumer_cursor import ConsumerCursor
 from app.models.history_output import HistoryOutputChunk
 from app.models.history_projection import HistoryProjection
+from app.models.policy import (
+    ActiveWorkspace,
+    PolicyGroup,
+    PolicyRule,
+    SdkRegistration,
+)
 from app.models.session import Session
 from app.models.system_meta import SystemMeta
 
 __all__ = [
+    "ActiveWorkspace",
     "Connection",
     "ConsoleActivity",
     "ConsumerCursor",
     "HistoryOutputChunk",
     "HistoryProjection",
+    "PolicyGroup",
+    "PolicyRule",
+    "SdkRegistration",
     "Session",
     "SystemMeta",
 ]

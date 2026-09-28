@@ -320,3 +320,52 @@ export interface BackupBatchDeleteResponse {
   failed: number;
   details: { backup_id: string; deleted: boolean; error?: string }[];
 }
+
+// --- Policy types ---
+export interface PolicyGroup {
+  id: string;
+  name: string;
+  description: string;
+  version: number;
+  enabled: boolean;
+  rule_count: number;
+  registration_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PolicyRule {
+  id: string;
+  group_id: string;
+  sandbox_id: string | null;
+  rule_type: 'command' | 'workspace';
+  pattern: string;
+  effect: 'allow' | 'deny';
+  operations: string;
+  priority: number;
+  description: string;
+  is_baseline: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SdkRegistration {
+  id: string;
+  group_id: string;
+  sandbox_id: string;
+  sandbox_name: string | null;
+  agent_name: string | null;
+  sdk_version: string;
+  callback_url: string | null;
+  callback_mode: string;
+  last_seen: string;
+  online: boolean;
+}
+
+export interface SandboxLookupResponse {
+  sandbox_id: string;
+  sandbox_instance_id: string;
+  provider_name: string;
+  provider_key: string;
+  agent_name: string | null;
+}

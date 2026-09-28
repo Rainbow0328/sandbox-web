@@ -1,22 +1,22 @@
-"""Command policy engine — v0.1 default allow, v0.3 will add full rule matching.
-
-(对齐 §9.3、§15.4)
+"""Command policy engine — uses DB-backed policy groups for rule matching.
 
 Policy evaluation dimensions:
-- command (exact match or regex)
-- cwd
-- path (for file operations)
+- command (regex match)
+- cwd / path (glob match)
 - actor
 - operation_type
 
-v0.1 behavior: all commands are allowed by default. The interface is provided
-so that v0.3 can wire in a full rule engine without changing call sites.
+When a policy group is configured, rules are loaded from the DB
+and evaluated in priority order.  When no group is configured,
+default allow is returned.
 """
 
 from __future__ import annotations
 
+import fnmatch
+import re
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 
 @dataclass
@@ -28,46 +28,32 @@ class PolicyDecision:
     rule_id: str | None = None
 
 
-# v0.1: Optional denylist of dangerous commands (empty by default).
-# In v0.3, this will be loaded from a policy database.
-_DENYLIST: set[str] = set()
-
-# Commands that require approval (v0.3 feature).
-_APPROVAL_REQUIRED: set[str] = set()
-
-
 def evaluate_command_policy(
     command: str,
     cwd: str | None = None,
     actor_id: str = "admin",
     operation_type: str = "command.start",
+    rules: list[dict[str, Any]] | None = None,
 ) -> PolicyDecision:
     """Evaluate whether a command is allowed.
 
-    v0.1: default allow, with an optional static denylist.
-    v0.3: will load rules from a policy database and match on
-    command/cwd/path/actor/operation_type dimensions.
+    If *rules* is provided, match against them in priority order.
+    Otherwise, default allow.
     """
-    # Extract the base command (first token).
-    base_cmd = command.strip().split()[0] if command.strip() else ""
-
-    # Check denylist.
-    if base_cmd in _DENYLIST:
-        return PolicyDecision(
-            result="deny",
-            reason=f"Command '{base_cmd}' is in the denylist",
-            rule_id="denylist",
-        )
-
-    # Check approval required.
-    if base_cmd in _APPROVAL_REQUIRED:
-        return PolicyDecision(
-            result="approval_required",
-            reason=f"Command '{base_cmd}' requires approval",
-            rule_id="approval_required",
-        )
-
-    # Default: allow.
+    if rules:
+        for rule in rules:
+            if rule.get("rule_type") != "command":
+                continue
+            pattern = rule.get("pattern", "")
+            try:
+                if re.search(pattern, command) is not None:
+                    return PolicyDecision(
+                        result=rule.get("effect", "allow"),
+                        reason=rule.get("description", f"Rule: {pattern}"),
+                        rule_id=rule.get("id"),
+                    )
+            except re.error:
+                continue
     return PolicyDecision(
         result="allow",
         reason="default allow",
@@ -79,12 +65,29 @@ def evaluate_file_policy(
     path: str,
     operation: str,
     actor_id: str = "admin",
+    rules: list[dict[str, Any]] | None = None,
 ) -> PolicyDecision:
-    """Evaluate whether a file operation is allowed.
-
-    v0.1: all file operations are allowed (path normalization is handled
-    separately in file_service.normalize_path).
-    """
+    """Evaluate whether a file operation is allowed."""
+    if rules:
+        op = operation.rsplit(".", 1)[-1] if "." in operation else operation
+        # Map delete→write, list→read for rule matching (same as SDK)
+        if op == "delete":
+            op = "write"
+        elif op == "list":
+            op = "read"
+        for rule in rules:
+            if rule.get("rule_type") != "workspace":
+                continue
+            operations = rule.get("operations", "read,write,execute")
+            if op and op not in [o.strip() for o in operations.split(",")]:
+                continue
+            pattern = rule.get("pattern", "")
+            if fnmatch.fnmatch(path, pattern):
+                return PolicyDecision(
+                    result=rule.get("effect", "allow"),
+                    reason=rule.get("description", f"Rule: {pattern}"),
+                    rule_id=rule.get("id"),
+                )
     return PolicyDecision(
         result="allow",
         reason="default allow",

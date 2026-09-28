@@ -1,12 +1,13 @@
 import { useEffect } from 'react';
 import { Outlet, useNavigate, useLocation, Link } from 'react-router-dom';
-import { Boxes, Server, LogOut, Terminal, ChevronRight } from 'lucide-react';
+import { Boxes, Server, LogOut, Terminal, ChevronRight, Shield } from 'lucide-react';
 import { useAuthStore } from '@/stores/authStore';
 import { cn } from '@/lib/utils';
 
 const navItems = [
   { path: '/sandboxes', label: 'Sandboxes', icon: Boxes },
   { path: '/connections', label: 'Connections', icon: Server },
+  { path: '/policies', label: '权限管理', icon: Shield },
 ];
 
 export function AppShell() {
@@ -104,7 +105,7 @@ export function AppShell() {
         </aside>
 
         {/* Main Content */}
-        <main className={cn('flex-1 overflow-auto', !inSandboxDetail && 'p-6')}>
+        <main className={cn('flex-1 overflow-auto', !inSandboxDetail && 'p-6 h-full')}>
           <Outlet />
         </main>
       </div>

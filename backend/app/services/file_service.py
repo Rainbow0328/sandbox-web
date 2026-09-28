@@ -12,10 +12,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters import SandboxAdapter
 from app.adapters.base import FileKind, SandboxRef, WriteFileRequest
-from app.core.errors import PathEscapeError, SandboxNotFoundError
+from app.core.errors import CommandPolicyDeniedError, PathEscapeError, SandboxNotFoundError
+from app.gateway.policy import evaluate_file_policy
 from app.history.writer import write_operation_to_sandbox_history
 from app.models.connection import Connection
 from app.models.console_activity import ConsoleActivity
+from app.models.policy import ActiveWorkspace, PolicyRule
 from app.schemas.file import (
     FileContentResponse,
     FileEntryResponse,
@@ -188,6 +190,14 @@ async def list_files(
     workdir = connection.default_workdir or "/"
     norm_path = normalize_path(path, workdir)
 
+    # Policy check
+    rules = await _load_rules_for_sandbox(session, sandbox_id)
+    decision = evaluate_file_policy(
+        path=norm_path, operation="file.list", actor_id=actor_id, rules=rules,
+    )
+    if decision.result == "deny":
+        raise CommandPolicyDeniedError(decision.reason)
+
     # Gracefully handle non-existent directories: return an empty list
     # instead of propagating a 500 error.
     try:
@@ -222,6 +232,14 @@ async def read_file(
     ref, adapter, connection = await get_sandbox_ref(session, connection_id, sandbox_id)
     workdir = connection.default_workdir or "/"
     norm_path = normalize_path(path, workdir)
+
+    # Policy check
+    rules = await _load_rules_for_sandbox(session, sandbox_id)
+    decision = evaluate_file_policy(
+        path=norm_path, operation="file.read", actor_id=actor_id, rules=rules,
+    )
+    if decision.result == "deny":
+        raise CommandPolicyDeniedError(decision.reason)
 
     content_bytes = await adapter.read_file(ref, norm_path)
     content_hash = hashlib.sha256(content_bytes).hexdigest()
@@ -258,6 +276,14 @@ async def write_file(
     ref, adapter, connection = await get_sandbox_ref(session, connection_id, sandbox_id)
     workdir = connection.default_workdir or "/"
     norm_path = normalize_path(path, workdir)
+
+    # Policy check
+    rules = await _load_rules_for_sandbox(session, sandbox_id)
+    decision = evaluate_file_policy(
+        path=norm_path, operation="file.write", actor_id=actor_id, rules=rules,
+    )
+    if decision.result == "deny":
+        raise CommandPolicyDeniedError(decision.reason)
 
     content_bytes = content.encode("utf-8")
     request = WriteFileRequest(
@@ -366,6 +392,14 @@ async def delete_file(
     workdir = connection.default_workdir or "/"
     norm_path = normalize_path(path, workdir)
 
+    # Policy check
+    rules = await _load_rules_for_sandbox(session, sandbox_id)
+    decision = evaluate_file_policy(
+        path=norm_path, operation="file.delete", actor_id=actor_id, rules=rules,
+    )
+    if decision.result == "deny":
+        raise CommandPolicyDeniedError(decision.reason)
+
     await adapter.delete_file(ref, norm_path)
 
     activity = await _log_activity(
@@ -442,3 +476,44 @@ async def upload_file(
         size=len(content),
         previous_hash=result.previous_hash,
     )
+
+
+async def _load_rules_for_sandbox(
+    session: AsyncSession,
+    sandbox_id: str,
+) -> list[dict]:
+    """Load policy rules applicable to a sandbox.
+
+    Returns group-level rules + sandbox-level overrides.
+    """
+    ws_result = await session.execute(
+        select(ActiveWorkspace).where(
+            ActiveWorkspace.sandbox_id == sandbox_id,
+            ActiveWorkspace.active == True,  # noqa: E712
+        )
+    )
+    ws = ws_result.scalar_one_or_none()
+    if ws is None or ws.group_id is None:
+        return []
+
+    rules_result = await session.execute(
+        select(PolicyRule)
+        .where(
+            PolicyRule.group_id == ws.group_id,
+            (PolicyRule.sandbox_id.is_(None)) | (PolicyRule.sandbox_id == sandbox_id),
+        )
+        .order_by(PolicyRule.priority.desc())
+    )
+    rules = rules_result.scalars().all()
+    return [
+        {
+            "id": r.id,
+            "rule_type": r.rule_type,
+            "pattern": r.pattern,
+            "effect": r.effect,
+            "operations": r.operations,
+            "priority": r.priority,
+            "description": r.description,
+        }
+        for r in rules
+    ]

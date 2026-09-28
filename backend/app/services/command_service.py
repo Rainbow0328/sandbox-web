@@ -12,8 +12,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.adapters.base import ExecRequest
 from app.core.config import get_settings
 from app.core.errors import CommandPolicyDeniedError
-from app.gateway.policy import evaluate_command_policy
+from app.gateway.policy import evaluate_command_policy, evaluate_file_policy
 from app.history.writer import write_operation_to_sandbox_history
+from app.models.policy import ActiveWorkspace, PolicyGroup, PolicyRule
 from app.schemas.command import (
     CommandCreateRequest,
     CommandCreateResponse,
@@ -21,6 +22,7 @@ from app.schemas.command import (
     CommandStatus,
 )
 from app.services.file_service import _log_activity, get_sandbox_ref
+from sqlalchemy import select
 
 # In-memory store for command results (v0.1: no persistence needed for
 # foreground commands; background commands are also short-lived with FakeAdapter).
@@ -59,9 +61,13 @@ async def execute_command(
     settings = get_settings()
     timeout = request.timeout_seconds or settings.command_default_timeout_seconds
 
-    # Evaluate command policy (§9.3, §15.4) — v0.1 defaults to allow.
+    # Load policy rules from DB for this sandbox's group
+    rules = await _load_rules_for_sandbox(session, sandbox_id)
+
+    # Evaluate command policy (§9.3, §15.4)
     decision = evaluate_command_policy(
         command=request.command, cwd=cwd, actor_id=actor_id,
+        rules=rules,
     )
     if decision.result == "deny":
         await _log_activity(
@@ -70,6 +76,28 @@ async def execute_command(
             {"command": request.command, "reason": decision.reason},
         )
         raise CommandPolicyDeniedError(decision.reason)
+
+    # Path inference: extract paths from shell commands (mkdir, cd, etc.)
+    # and check workspace policy for them
+    inferred_paths = _infer_paths_from_command(request.command, cwd)
+    for inferred_path in inferred_paths:
+        file_decision = evaluate_file_policy(
+            path=inferred_path, operation="file.write", actor_id=actor_id,
+            rules=rules,
+        )
+        if file_decision.result == "deny":
+            await _log_activity(
+                session, connection_id, sandbox_id, actor_id,
+                "command.finish", "denied",
+                {
+                    "command": request.command,
+                    "reason": file_decision.reason,
+                    "inferred_path": inferred_path,
+                },
+            )
+            raise CommandPolicyDeniedError(
+                f"Command denied due to path {inferred_path}: {file_decision.reason}"
+            )
 
     # Build exec request.
     exec_request = ExecRequest(
@@ -227,3 +255,120 @@ def get_command_events(command_id: str) -> list[dict]:
 def has_command_events(command_id: str) -> bool:
     """Check if a command has an event queue."""
     return command_id in _event_queues
+
+
+# ── Path inference ──────────────────────────────────────────────────
+
+import shlex
+
+# Commands that take a path as their first argument
+_PATH_COMMANDS = {
+    "mkdir", "cd", "rmdir", "touch", "rm", "cp", "mv", "ln",
+    "cat", "head", "tail", "less", "more", "nano", "vim", "vi",
+    "chmod", "chown", "chgrp", "stat", "file", "du", "df",
+    "tar", "zip", "unzip", "gzip", "gunzip",
+    "find", "locate", "which", "whereis",
+    "git",  # git -C <path> ...
+    "ls",   # ls <path>
+}
+
+# Flags that precede the path argument
+_PATH_FLAGS = {
+    "-r", "-R", "-f", "-rf", "-fr", "-rfv", "-frv",
+    "-p", "-v", "-pv", "-vp",
+    "-a", "-l", "-al", "-la",
+    "-d", "-h", "-c",
+    "--recursive", "--force", "--verbose", "--parents",
+    "--all", "--almost-all", "--long",
+}
+
+
+def _infer_paths_from_command(command: str, cwd: str) -> list[str]:
+    """Extract file/directory paths from shell commands.
+
+    Handles common commands like mkdir, rm, touch, cat, etc.
+    Returns a list of absolute paths.
+    """
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return []
+    if not tokens:
+        return []
+
+    base_cmd = tokens[0].rsplit("/", 1)[-1]  # strip path prefix like /usr/bin/
+    if base_cmd not in _PATH_COMMANDS:
+        return []
+
+    paths: list[str] = []
+
+    # Special case: git -C <path>
+    if base_cmd == "git":
+        for i, tok in enumerate(tokens[1:], 1):
+            if tok == "-C" and i + 1 < len(tokens):
+                paths.append(_resolve_path(tokens[i + 1], cwd))
+        return paths
+
+    # Generic: skip flags, collect non-flag arguments as paths
+    for tok in tokens[1:]:
+        if tok.startswith("-"):
+            continue
+        if tok in _PATH_FLAGS:
+            continue
+        if "=" in tok and tok.startswith("--"):
+            continue  # --flag=value
+        paths.append(_resolve_path(tok, cwd))
+
+    return paths
+
+
+def _resolve_path(path: str, cwd: str) -> str:
+    """Resolve a relative path against cwd to produce an absolute path."""
+    if path.startswith("/"):
+        return path
+    if cwd.endswith("/"):
+        return f"{cwd}{path}"
+    return f"{cwd}/{path}"
+
+
+async def _load_rules_for_sandbox(
+    session: AsyncSession,
+    sandbox_id: str,
+) -> list[dict]:
+    """Load policy rules applicable to a sandbox.
+
+    Returns group-level rules + sandbox-level overrides.
+    """
+    # Find the active workspace for this sandbox to get the group_id
+    ws_result = await session.execute(
+        select(ActiveWorkspace).where(
+            ActiveWorkspace.sandbox_id == sandbox_id,
+            ActiveWorkspace.active == True,  # noqa: E712
+        )
+    )
+    ws = ws_result.scalar_one_or_none()
+    if ws is None or ws.group_id is None:
+        return []
+
+    # Load rules: group-level (sandbox_id IS NULL) + sandbox-level
+    rules_result = await session.execute(
+        select(PolicyRule)
+        .where(
+            PolicyRule.group_id == ws.group_id,
+            (PolicyRule.sandbox_id.is_(None)) | (PolicyRule.sandbox_id == sandbox_id),
+        )
+        .order_by(PolicyRule.priority.desc())
+    )
+    rules = rules_result.scalars().all()
+    return [
+        {
+            "id": r.id,
+            "rule_type": r.rule_type,
+            "pattern": r.pattern,
+            "effect": r.effect,
+            "operations": r.operations,
+            "priority": r.priority,
+            "description": r.description,
+        }
+        for r in rules
+    ]

@@ -1,12 +1,46 @@
+<!-- GEO Meta: keywords for AI search engines -->
+<!--
+  Keywords: AI agent sandbox web console, OpenSandbox web UI, sandbox management dashboard,
+  AI agent file browser, sandbox terminal web, agent operation history timeline,
+  file backup rollback web UI, sandbox permission management, policy group management,
+  Monaco editor sandbox, xterm.js web terminal, FastAPI React sandbox console,
+  AI code execution dashboard, sandbox real-time monitoring
+-->
+
 # Sandbox Console
 
-沙箱管理 Web 控制台 —— 让 AI Agent 在沙箱里干活，人类在浏览器里围观。
+> **AI Agent 沙箱管理 Web 控制台** — 让 AI Agent 在沙箱里干活，人类在浏览器里围观。
 
-基于 FastAPI（后端）+ React/TypeScript（前端）构建，支持 pip 一键安装、Docker 部署或源码开发模式。前端预编译打包进 wheel，**无需 Node.js**。
+[![Python 3.11+](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![React 18](https://img.shields.io/badge/React-18-blue.svg)](https://react.dev/)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-green.svg)](LICENSE)
 
-> 配套 SDK：[`agent-sandbox-backends`](https://gitee.com/rainbow-zhou/agent-sandbox-backend.git)（需从本地源码安装，见下文）
+## 概述
 
-## 核心功能
+`sandbox-console` 是一个基于 **FastAPI + React/TypeScript** 构建的沙箱管理 Web 控制台。它与 `agent-sandbox-backends` SDK 配合使用，为 AI Agent 沙箱提供可视化的文件管理、命令执行、终端、历史时间线、文件备份与权限策略管理。
+
+前端预编译打包进 wheel，**无需 Node.js** 即可 `pip install` 一键部署。
+
+## 🆕 本次更新
+
+本次版本新增了以下核心功能：
+
+| 新功能 | 说明 |
+|--------|------|
+| **权限策略管理 UI** | 新增 `PoliciesPage` 全局策略管理页面，支持策略组 CRUD、规则管理（命令规则 + 路径规则）、效果（allow/deny）、优先级、操作范围（read/write/execute）、一键推送到 SDK |
+| **沙箱级权限覆盖** | 在 `SandboxDetailPage` 新增沙箱级策略覆盖功能，可针对单个沙箱设置专属规则，优先级高于组级规则 |
+| **策略评估网关** | 新增 `app/gateway/policy.py`，Console 侧文件操作权限检查，操作映射：`delete`→`write`、`list`→`read`，优先级：沙箱级 > 组级 > 基线 |
+| **SDK 注册与策略同步** | 新增 `POST /api/v1/policies/register` 端点，接收 SDK 注册（含预设规则、基线规则、回调信息），返回当前规则集 |
+| **策略推送（Push）** | 新增 `POST /api/v1/policies/push` 端点，修改规则后主动推送到已注册 SDK 的 callback_url，按 `sandbox_id` 过滤规则（组级 + 该沙箱的覆盖） |
+| **策略长轮询（Long Poll）** | 新增 `GET /api/v1/policies/listen` 端点，SDK 长轮询监听策略更新（304=无更新，200=有更新），适用于无法暴露端口的场景 |
+| **策略完整获取** | 新增 `GET /api/v1/policies/full` 端点，一次性返回完整规则集（组级 + 沙箱级） |
+| **沙箱按名复用** | 新增 `GET /api/v1/sandboxes/by-name/{name}` 端点，SDK 创建前查找同名沙箱，找到则连接而非新建 |
+| **策略数据模型** | 新增 `policy_groups`、`policy_rules`、`sdk_registrations`、`active_workspaces` 四张数据表，支持版本号追踪和沙箱级覆盖 |
+| **LangChain / MCP 框架支持** | SDK 新增 LangChain 和 MCP 适配器，Console 不限制框架，任何使用 SDK 创建的沙箱均可在 Console 中管理 |
+
+> **此前已有功能**：沙箱管理、文件浏览器（Monaco Editor）、命令执行（SSE 流式）、终端（xterm.js + WebSocket）、历史时间线、文件备份与回滚（Git 风格 Diff、智能快照）、连接管理、Docker 部署等。
+
+### 核心功能
 
 | 功能 | 说明 |
 |------|------|
@@ -16,8 +50,41 @@
 | 终端 | 基于 xterm.js + WebSocket 的交互式 Shell |
 | 历史时间线 | Agent 和 Console 的所有操作统一展示，可过滤、可下钻 |
 | **文件备份与回滚** | 类 Git 的文件级备份，支持自动/手动备份、内容预览、一键回滚 |
+| **权限策略管理** | 全局策略组 + 沙箱级覆盖，Web UI 可视化规则管理 |
+| **SDK 注册与策略同步** | SDK 注册、推送规则、实时策略下发（Push / Long Poll） |
+| **沙箱按名复用** | 按名称查找已有沙箱，支持跨会话工作区复用 |
 | 连接管理 | 注册多个 OpenSandbox 实例，加密存储凭证，一键测试连通性 |
 | 可观测性 | 健康检查、Prometheus 指标、结构化日志 |
+
+### 架构
+
+```
+┌───────────────────────────────────────────────────────────┐
+│                    Web Browser (React)                     │
+│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────────┐ │
+│  │ Sandbox  │ │ File     │ │ Terminal │ │ Policies     │ │
+│  │ List     │ │ Browser  │ │ (xterm)  │ │ Management    │ │
+│  └──────────┘ └──────────┘ └──────────┘ └──────────────┘ │
+└──────────────────────────┬────────────────────────────────┘
+                           │ REST API + WebSocket + SSE
+┌──────────────────────────▼────────────────────────────────┐
+│               FastAPI Backend (Python)                     │
+│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────────┐ │
+│  │ Sandbox  │ │ File     │ │ Command  │ │ Policy       │ │
+│  │ Service  │ │ Service  │ │ Service  │ │ Service      │ │
+│  ├──────────┤ ├──────────┤ ├──────────┤ ├──────────────┤ │
+│  │ Backup   │ │ History  │ │ Terminal  │ │ Gateway      │ │
+│  │ Service  │ │ Service  │ │ (WS)     │ │ (Eval)       │ │
+│  └──────────┘ └──────────┘ └──────────┘ └──────────────┘ │
+└──────────┬──────────────────────────┬─────────────────────┘
+           │                          │
+    ┌──────▼──────┐           ┌───────▼───────┐
+    │ OpenSandbox │           │ SDK (via API) │
+    │ Service     │           │ Push / Poll   │
+    └─────────────┘           └───────────────┘
+```
+
+> 配套 SDK：[`agent-sandbox-backends`](https://github.com/Rainbow0328/agent-sandbox-backend)（需从本地源码安装，见下文）
 
 ## 快速开始
 
@@ -53,7 +120,7 @@ pip install sandbox-console
 ```bash
 sandbox-console-server                      # 默认 http://localhost:9090
 sandbox-console-server --port 3000          # 自定义端口
-sandbox-console-server --host 127.0.0.1     # 仅本机访问
+sandbox-console-server --host 127.0.0.1    # 仅本机访问
 ```
 
 打开 `http://localhost:9090` 即可使用。本地使用无需任何环境变量，鉴权默认关闭。
@@ -79,7 +146,7 @@ sandbox-console-server --dev
 
 ### Docker 部署
 
-> Docker 构建需要 [`agent-sandbox-backends`](https://gitee.com/rainbow-zhou/agent-sandbox-backend.git) SDK 源码作为同级目录。
+> Docker 构建需要 [`agent-sandbox-backends`](https://github.com/Rainbow0328/agent-sandbox-backend) SDK 源码作为同级目录。
 
 ```bash
 # 构建（从包含两个仓库的父目录执行）
@@ -95,6 +162,74 @@ docker run -d -p 9090:9090 -v sandbox-console-data:/data sandbox-console
 cd sandbox-console
 docker compose up -d
 ```
+
+## 权限策略管理
+
+Console 提供 Web UI 管理沙箱权限策略，支持 **全局策略组** 和 **沙箱级覆盖**。
+
+### 策略模型
+
+```
+策略组 (Policy Group)
+├── 组级规则 (sandbox_id=NULL)  → 对组内所有沙箱生效
+├── 沙箱级规则 (sandbox_id=xxx) → 仅对该沙箱生效（覆盖组级）
+└── SDK 注册记录 (SdkRegistration)
+    ├── sandbox_id
+    ├── callback_url / callback_mode
+    └── sdk_version
+```
+
+### 管理页面
+
+在左侧导航点击「**策略**」进入 `PoliciesPage`：
+
+- **策略组列表**：创建、编辑、删除策略组
+- **规则管理**：在每个组下添加命令规则和路径规则
+- **规则类型**：`command`（正则匹配命令）或 `workspace`（glob 匹配路径）
+- **效果**：`allow` 或 `deny`
+- **优先级**：数值越高越先匹配
+- **操作范围**：`read`、`write`、`execute`（逗号分隔）
+- **推送**：修改后点击「推送」按钮，将更新推送到已注册的 SDK
+- **SDK 注册列表**：查看已注册的 SDK 实例及其回调模式
+
+### 沙箱级权限覆盖
+
+在沙箱详情页 (`SandboxDetailPage`) 可以设置特定沙箱的覆盖规则：
+
+- 仅对该沙箱生效，优先级高于组级规则
+- 适用于单个沙箱需要特殊权限的场景（如临时允许写入特定目录）
+
+### SDK 注册流程
+
+```
+SDK 启动
+  │
+  ▼
+POST /api/v1/policies/register
+  │  payload: { sdk_version, policy_group, sandbox_id,
+  │             sandbox_name, callback_url, callback_mode,
+  │             preset_rules, baseline_rules }
+  │
+  ▼
+Console 存储规则 + 返回当前规则集
+  │
+  ▼
+SDK 初始化 PolicyCache
+  │
+  ├── callback_mode=push  → Console 修改规则后 POST 到 callback_url
+  └── callback_mode=long_poll → SDK GET /policies/listen (阻塞等待)
+```
+
+### 推送策略到 SDK
+
+Console 修改规则后，可主动推送到已注册的 SDK：
+
+```bash
+POST /api/v1/policies/push
+# Body: { group: "xxx", sandbox_id: "xxx" (可选) }
+```
+
+推送时会按 `sandbox_id` 过滤规则，仅推送该沙箱应接收的规则（组级 + 该沙箱的覆盖）。
 
 ## 端口配置
 
@@ -206,7 +341,7 @@ backend = await create_opensandbox_backend(
 2. **自动读取当前文件，如果内容不同则创建 `pre_restore` 快照备份**
 3. **优化：如果当前内容已存在备份记录（如撤销回滚），跳过快照创建，避免冗余**
 4. 将备份内容写回文件
-5. 前端提示“回滚前已自动创建备份”，用户可从快照再次回滚来撤销
+5. 前端提示"回滚前已自动创建备份"，用户可从快照再次回滚来撤销
 
 ### 备份触发器类型
 
@@ -219,6 +354,8 @@ backend = await create_opensandbox_backend(
 | `pre_restore` | 琥珀色 | 回滚前自动创建的安全快照 |
 
 ## API 概览
+
+### 沙箱与文件操作
 
 | 端点 | 方法 | 说明 |
 |------|------|------|
@@ -234,11 +371,30 @@ backend = await create_opensandbox_backend(
 | `/api/v1/connections/{id}/sandboxes/{sid}/commands/{cid}/stream` | GET | SSE 流 |
 | `/api/v1/sandboxes/{cid}/{sid}/history` | GET | 操作历史 |
 | `/api/v1/connections/{id}/sandboxes/{sid}/terminals` | POST | 创建终端 |
-| `/api/v1/connections/{cid}/sandboxes/{sid}/backups` | GET/POST/DELETE | 文件备份列表/创建/批量删除 |
+
+### 文件备份
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/api/v1/connections/{cid}/sandboxes/{sid}/backups` | GET/POST/DELETE | 备份列表/创建/批量删除 |
 | `/api/v1/connections/{cid}/sandboxes/{sid}/backups/files` | GET | 有备份的文件列表 |
 | `/api/v1/connections/{cid}/sandboxes/{sid}/backups/{bid}` | GET/DELETE | 单个备份详情/删除 |
 | `/api/v1/connections/{cid}/sandboxes/{sid}/backups/{bid}/restore` | POST | 回滚文件 |
 | `/api/v1/connections/{cid}/sandboxes/{sid}/backups/{bid}/diff` | GET | 获取备份与下一版本的 Git 风格 diff |
+
+### 权限策略管理
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/api/v1/policies/register` | POST | SDK 注册 + 预设规则推送 |
+| `/api/v1/policies/push` | POST | 推送策略更新到 SDK |
+| `/api/v1/policies/listen` | GET | 长轮询监听策略更新 |
+| `/api/v1/policies/full` | GET | 一次性获取完整规则集 |
+| `/api/v1/policies/groups` | GET/POST | 策略组列表/创建 |
+| `/api/v1/policies/groups/{id}` | GET/PUT/DELETE | 策略组详情/更新/删除 |
+| `/api/v1/policies/groups/{id}/rules` | GET/POST | 组内规则列表/创建 |
+| `/api/v1/policies/rules/{id}` | PUT/DELETE | 规则更新/删除 |
+| `/api/v1/sandboxes/by-name/{name}` | GET | 按名称查找沙箱（复用） |
 
 ## Deep Agents 集成
 
@@ -308,7 +464,6 @@ app = graph.compile()
 langgraph dev  # 启动 LangGraph 开发服务器
 ```
 
-
 ## 项目结构
 
 ```
@@ -322,17 +477,18 @@ sandbox-console/
 │   │   ├── static/         # 打包的前端静态文件
 │   │   ├── core/           # 配置、安全、错误处理
 │   │   ├── db/             # 数据库引擎、会话、基类
-│   │   ├── models/         # ORM 模型
+│   │   ├── models/         # ORM 模型（含 policy.py）
 │   │   ├── schemas/        # Pydantic 数据模型
 │   │   ├── adapters/       # 沙箱适配器 (Fake, OpenSandbox)
-│   │   ├── services/       # 业务逻辑层
-│   │   ├── api/v1/         # REST 路由
+│   │   ├── services/       # 业务逻辑层（含 policy_service.py）
+│   │   ├── gateway/        # 策略评估网关 (policy.py)
+│   │   ├── api/v1/         # REST 路由（含 policies.py）
 │   │   ├── realtime/       # WebSocket 终端
 │   │   └── observability/  # 指标、健康检查
 │   └── tests/             # 集成测试
 ├── frontend/              # React + TypeScript 前端
 │   └── src/
-│       ├── pages/          # 页面组件
+│       ├── pages/          # 页面组件（含 PoliciesPage, SandboxDetailPage）
 │       ├── features/       # 功能模块（文件、命令、历史、终端、备份）
 │       ├── lib/            # API 客户端、工具函数
 │       └── stores/         # Zustand 状态管理
@@ -352,3 +508,49 @@ pytest tests/ -v
 ## 许可证
 
 Apache-2.0 — 详见 [LICENSE](LICENSE)。
+
+---
+
+## FAQ
+
+<details>
+<summary><b>这个 Web Console 和 SDK 是什么关系？</b></summary>
+
+`agent-sandbox-backends` SDK 是 AI Agent 侧的 Python 库，负责操作沙箱（文件读写、命令执行等）。`sandbox-console` 是人类侧的 Web 管理界面，用于查看沙箱状态、浏览文件、查看历史、管理备份和配置权限。两者不直接通信，通过同一个沙箱及其中 SQLite 数据库协作。Console 是可选的，SDK 可以独立运行。
+</details>
+
+<details>
+<summary><b>支持哪些 AI Agent 框架？</b></summary>
+
+SDK 原生支持 Deep Agents、LangChain 和 MCP (Model Context Protocol)。Console 不限制框架，任何使用 SDK 创建的沙箱都可以在 Console 中管理。
+</details>
+
+<details>
+<summary><b>权限策略如何实时生效？</b></summary>
+
+Console 支持两种策略同步模式：Push（Webhook 推送到 SDK 的回调端口，秒级延迟）和 Long Poll（SDK 长轮询 Console，适用于无法暴露端口的场景）。SDK 收到更新后在内存中更新 PolicyCache，后续操作立即使用新规则，零 HTTP 开销。
+</details>
+
+<details>
+<summary><b>文件备份存在哪里？会被删除吗？</b></summary>
+
+备份存储在沙箱内部的 SQLite 数据库中。当沙箱被删除时，备份数据也会一起删除。如需持久保留备份，请在删除沙箱前导出备份内容。
+</details>
+
+<details>
+<summary><b>前端需要 Node.js 吗？</b></summary>
+
+不需要。前端在构建 wheel 时预编译打包进了 Python 包，`pip install sandbox-console` 后直接启动即可。仅在源码开发模式 (`--dev`) 下需要 Node.js 18+。
+</details>
+
+<details>
+<summary><b>如何管理多个沙箱的不同权限？</b></summary>
+
+使用策略组 (Policy Group) 管理共享规则，在沙箱详情页设置沙箱级覆盖规则。组级规则对所有组内沙箱生效，沙箱级规则覆盖组级规则。修改后点击「推送」按钮即可实时下发到 SDK。
+</details>
+
+<details>
+<summary><b>支持按名称复用沙箱吗？</b></summary>
+
+支持。SDK 设置 `reuse_by_name=True` 后，创建前会通过 Console 的 `GET /api/v1/sandboxes/by-name/{name}` 查找同名沙箱。如果找到则直接连接而非新建，适用于跨会话保持工作区状态。
+</details>

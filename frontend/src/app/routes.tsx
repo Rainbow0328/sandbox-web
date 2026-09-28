@@ -4,6 +4,7 @@ import { LoginPage } from '@/pages/LoginPage';
 import { ConnectionsPage } from '@/pages/ConnectionsPage';
 import { SandboxesPage } from '@/pages/SandboxesPage';
 import { SandboxDetailPage } from '@/pages/SandboxDetailPage';
+import { PoliciesPage } from '@/pages/PoliciesPage';
 
 export const router = createBrowserRouter([
   {
@@ -30,6 +31,7 @@ export const router = createBrowserRouter([
         path: 'sandboxes/:connectionId/:sandboxId',
         element: <SandboxDetailPage />,
       },
+      { path: 'policies', element: <PoliciesPage /> },
       // Catch-all: redirect any unknown URL to sandboxes.
       { path: '*', element: <Navigate to="/sandboxes" replace /> },
     ],
