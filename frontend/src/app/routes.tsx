@@ -5,6 +5,7 @@ import { ConnectionsPage } from '@/pages/ConnectionsPage';
 import { SandboxesPage } from '@/pages/SandboxesPage';
 import { SandboxDetailPage } from '@/pages/SandboxDetailPage';
 import { PoliciesPage } from '@/pages/PoliciesPage';
+import { DashboardPage } from '@/pages/DashboardPage';
 
 export const router = createBrowserRouter([
   {
@@ -24,7 +25,8 @@ export const router = createBrowserRouter([
       </div>
     ),
     children: [
-      { index: true, element: <Navigate to="/sandboxes" replace /> },
+      { index: true, element: <Navigate to="/dashboard" replace /> },
+      { path: 'dashboard', element: <DashboardPage /> },
       { path: 'connections', element: <ConnectionsPage /> },
       { path: 'sandboxes', element: <SandboxesPage /> },
       {

@@ -1,10 +1,11 @@
 import { useEffect } from 'react';
 import { Outlet, useNavigate, useLocation, Link } from 'react-router-dom';
-import { Boxes, Server, LogOut, Terminal, ChevronRight, Shield } from 'lucide-react';
+import { Boxes, Server, LogOut, Terminal, ChevronRight, Shield, LayoutDashboard } from 'lucide-react';
 import { useAuthStore } from '@/stores/authStore';
 import { cn } from '@/lib/utils';
 
 const navItems = [
+  { path: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { path: '/sandboxes', label: 'Sandboxes', icon: Boxes },
   { path: '/connections', label: 'Connections', icon: Server },
   { path: '/policies', label: '权限管理', icon: Shield },

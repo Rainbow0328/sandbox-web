@@ -369,3 +369,45 @@ export interface SandboxLookupResponse {
   provider_key: string;
   agent_name: string | null;
 }
+
+// --- Dashboard types ---
+export interface DashboardOverview {
+  connections: { total: number; enabled: number };
+  sandboxes: { total: number; by_state: Record<string, number> };
+  workspaces: { total: number; active: number };
+  policy_groups: { total: number; enabled: number };
+  policy_rules: { total: number; allow: number; deny: number };
+  agents: { total: number; online: number };
+  operations: {
+    total: number;
+    by_type: Record<string, number>;
+    by_status: Record<string, number>;
+    by_source: Record<string, number>;
+    by_actor: { actor_id: string; count: number }[];
+    recent: RecentOperation[];
+  };
+  sandbox_summaries: {
+    sandbox_id: string;
+    connection_id: string | null;
+    name: string;
+    state: string;
+    image: string | null;
+    created_at: string | null;
+    last_activity_at: string | null;
+  }[];
+}
+
+export interface RecentOperation {
+  event_id: string;
+  connection_id: string;
+  sandbox_id: string;
+  source: string;
+  actor_type: string;
+  actor_id: string | null;
+  operation_type: string;
+  status: string;
+  occurred_at: string;
+  duration_ms: number | null;
+  command: string | null;
+  file_path: string | null;
+}
